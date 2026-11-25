@@ -1,0 +1,59 @@
+[package]
+name = "flowblur"
+version = "0.5.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/treydoe1/flowblur"
+description = "FlowBlur: optical-flow motion blur, Adobe Premiere Pro / After Effects effect shell"
+publish = false
+
+[lib]
+name = "flowblur"
+# cdylib is the shipped plug-in binary; rlib lets `cargo test` link the unit tests.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned to the reviewed commit rather than crates.io 0.4.0: the published 0.4.0 panics in
+# `RawCommand::from` on command selectors it does not know (Premiere sends private ones,
+# e.g. PF_Cmd_RESERVED3), passes the PiPL aeFL value instead of 8 as the reserved-info
+# argument of PluginDataEntryFunction2, and lacks the MFR `Sync` checks. Commit c2eb866 fixes
+# all three. Both crates report version 0.4.0.
+after-effects = { git = "https://github.com/virtualritz/after-effects", rev = "c2eb86609b293f046b18bc3e18e110dcc9ae9f17" }
+flowblur-core = { path = "../core", default-features = false }
+# Row-parallel pixel conversion on the global pool the core already uses.
+rayon = "1.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+premiere = { git = "https://github.com/virtualritz/after-effects", rev = "c2eb86609b293f046b18bc3e18e110dcc9ae9f17" }
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSObject", "NSRange"] }
+objc2-metal = { version = "0.3", features = [
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDevice",
+    "MTLResource",
+    "block2",
+] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-metal = { version = "0.3", features = ["MTLEvent"] }
+
+[build-dependencies]
+pipl = { git = "https://github.com/virtualritz/after-effects", rev = "c2eb86609b293f046b18bc3e18e110dcc9ae9f17" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "symbols"
+# Panics must unwind so the bindings' catch_unwind (enabled via the `catch_panics` cfg in
+# build.rs) and our own render-level catch_unwind can turn them into a pass-through frame.
+panic = "unwind"
+
+[profile.dev]
+panic = "unwind"

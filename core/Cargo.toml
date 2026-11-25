@@ -1,0 +1,35 @@
+[package]
+name = "flowblur-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/treydoe1/flowblur"
+
+[lib]
+name = "flowblur_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flowblur-cli"
+path = "src/bin/flowblur-cli.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:image"]
+
+[dependencies]
+rayon = "1.10"
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+debug = false
+
+[profile.test]
+opt-level = 3

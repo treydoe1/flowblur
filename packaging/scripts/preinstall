@@ -1,0 +1,15 @@
+#!/bin/sh
+# FlowBlur preinstall: remove the previously installed bundle so the new one is a clean copy.
+# Why: Installer merges a payload into an existing directory, so files left over from an older
+# FlowBlur.plugin would stay inside the bundle and break its code-signature seal (Premiere/AE refuse
+# plug-ins whose signature does not verify). If the old item is a symlink, rm removes the link only,
+# so the payload is never written through it to another location.
+# Only this one fixed path is ever removed.
+set -e
+
+if [ -e "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin" ] || \
+   [ -L "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin" ]; then
+    /bin/rm -rf "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin"
+fi
+
+exit 0
