@@ -3,27 +3,29 @@
 //! then shows "x.y.z is available" in its About text and on its last parameter row. Nothing is
 //! ever downloaded or installed.
 //!
-//! * The network request runs in the system `curl` as a child process (absolute path, empty
-//!   environment, no shell), so no network or TLS code runs inside the host's process. It asks
-//!   for `releases/latest`, which answers with a redirect to `releases/tag/<tag>`; only the
-//!   redirect target is read and it is never followed.
+//! * The network request runs in the system `curl` as a child process, so no network or TLS
+//!   code runs inside the host's process. The child is started with `posix_spawn` (absolute
+//!   path, no shell, empty environment, signals reset, and no descriptor inherited from the host
+//!   except the three it is given). It asks for `releases/latest`, which answers with a redirect
+//!   to `releases/tag/<tag>`; only the redirect target is read and it is never followed.
 //! * The reply is accepted only if it is exactly the expected tag URL with a
 //!   `MAJOR.MINOR.PATCH` version; anything else means "no information". Only the parsed numbers
 //!   are stored and shown.
 //! * State lives in `~/Library/Application Support/FlowBlur/update-check` (attempt time in Unix
-//!   seconds and the latest version seen). The attempt time is written before `curl` starts, so
-//!   several host processes loading the plug-in together do not all check.
+//!   seconds and the latest version seen). The attempt time is written before `curl` starts,
+//!   which makes it unlikely (not impossible) that several host processes loading the plug-in
+//!   together all check.
 //! * The file `~/Library/Application Support/FlowBlur/no-update-check` turns all of this off: no
 //!   child process, no request, no notice.
 //! * Every failure is silent; with the diagnostics log enabled, one line per attempt is logged.
 
-use std::io::{Read, Write};
+use std::ffi::{CString, c_char, c_int, c_short};
+use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::VERSION;
 use crate::diag;
@@ -43,7 +45,7 @@ const OFF_SWITCH_FILE: &str = "no-update-check";
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// The largest valid state file is 57 bytes.
 const MAX_STATE_BYTES: usize = 128;
-/// The largest valid redirect URL is 74 bytes.
+/// The largest valid redirect URL is 71 bytes.
 const MAX_OUTPUT_BYTES: usize = 1024;
 /// Hard wall-clock limit for the `curl` child; its own `--max-time` is 8 s.
 const CURL_TIME_LIMIT: Duration = Duration::from_secs(12);
@@ -51,6 +53,10 @@ const OPEN_TIME_LIMIT: Duration = Duration::from_secs(10);
 /// At most one release page opens per this interval, however often the host reports a click.
 const OPEN_INTERVAL_MS: u64 = 3000;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+/// Temporary and output files older than this are left over from an ended process.
+const LEFTOVER_AGE: Duration = Duration::from_secs(60 * 60);
+/// The leftover sweep looks at no more directory entries than this.
+const MAX_SWEEP_ENTRIES: usize = 1000;
 const MAX_VERSION_DIGITS: usize = 6;
 
 /// A release version. Ordering is numeric, part by part.
@@ -109,7 +115,8 @@ fn format_state(s: &State) -> String {
     format!("checked={}\nlatest={latest}\n", s.checked)
 }
 
-/// Accepts exactly the output of `format_state`.
+/// Accepts the form `format_state` writes: `checked=<1 to 20 digits>\nlatest=<version or
+/// nothing>\n`. Leading zeros in the numbers are accepted.
 fn parse_state(bytes: &[u8]) -> Option<State> {
     let rest = bytes.strip_prefix(b"checked=")?;
     let nl = rest.iter().position(|&b| b == b'\n')?;
@@ -143,9 +150,13 @@ fn ensure_dir(dir: &Path) -> bool {
     is_trusted_dir(dir)
 }
 
-/// Any entry at the off-switch path, of any type, turns the feature off.
+/// Any entry at the off-switch path, of any type, turns the feature off. So does any error
+/// other than "not found" while looking for it, since the switch might then exist unseen.
 fn is_off(dir: &Path) -> bool {
-    std::fs::symlink_metadata(dir.join(OFF_SWITCH_FILE)).is_ok()
+    match std::fs::symlink_metadata(dir.join(OFF_SWITCH_FILE)) {
+        Ok(_) => true,
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 /// Reads the state with the flag-file safety rules; unreadable, unsafe or malformed is `None`.
@@ -156,20 +167,47 @@ fn read_state(dir: &Path) -> Option<State> {
     parse_state(&diag::read_regular_file_capped(&dir.join(STATE_FILE), MAX_STATE_BYTES)?)
 }
 
+/// A fresh name for a temporary (`tmp`) or output (`out`) file in the state directory:
+/// `.update-check.<pid>.<seq>.<ext>`.
+fn temp_name(ext: &str) -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    format!(".{STATE_FILE}.{}.{}.{ext}", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Removes temporary and output files that a host process which ended mid-check left behind:
+/// names of the `temp_name` form, not directories, last modified more than `LEFTOVER_AGE`
+/// before `now`. Fresh ones may belong to a check running in another process and are kept.
+fn sweep_leftovers(dir: &Path, now: SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let prefix = format!(".{STATE_FILE}.");
+    for entry in entries.take(MAX_SWEEP_ENTRIES).flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(&prefix) || !(name.ends_with(".tmp") || name.ends_with(".out")) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        let old = meta.modified().ok().and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age > LEFTOVER_AGE);
+        if !meta.is_dir() && old {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Writes the state atomically: a temporary file created exclusively with mode 0600 in the same
 /// directory, then renamed over the state file. The temporary file is removed on any failure.
 fn write_state(dir: &Path, state: &State) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
-    // Darwin `<sys/fcntl.h>`: never follow a symlink at the temporary path.
-    const O_NOFOLLOW: i32 = 0x0100;
-    static SEQ: AtomicU64 = AtomicU64::new(0);
 
-    let tmp = dir.join(format!(".{STATE_FILE}.{}.{}.tmp", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
+    let tmp = dir.join(temp_name("tmp"));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)?;
     // From here on the temporary file is ours, so it is removed if anything fails. There is no
     // fsync (a full drive flush on macOS): a torn or empty file after a power cut fails to
@@ -241,7 +279,8 @@ fn check_once(ctx: &Ctx) -> Outcome {
     if previous.checked <= now && now - previous.checked < CHECK_INTERVAL_SECS {
         return Outcome::Recent;
     }
-    // Record the attempt before the request, so other host processes skip theirs.
+    sweep_leftovers(dir, SystemTime::now());
+    // Record the attempt before the request, so other host processes most likely skip theirs.
     if write_state(dir, &State { checked: now, latest: previous.latest }).is_err() {
         return Outcome::WriteFailed;
     }
@@ -283,8 +322,12 @@ fn start_with(once: &Once, make_ctx: impl FnOnce() -> Ctx + Send + 'static) -> O
 // ───────────────────────────── the real environment ─────────────────────────────
 
 /// The user's home directory: absolute, not `/`, a directory owned by the effective user.
+/// Tests never resolve it, so they cannot touch the real home directory.
 fn home_dir() -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
+    if cfg!(test) {
+        return None;
+    }
     let home = std::env::home_dir()?;
     if !home.is_absolute() || home == Path::new("/") {
         return None;
@@ -301,9 +344,17 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-fn curl_command() -> Command {
-    let mut cmd = Command::new(CURL);
-    cmd.env_clear().args([
+/// A child to start: absolute program path, arguments after `argv[0]`, and the complete
+/// environment (nothing is taken from the host's).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Spawn {
+    program: String,
+    args: Vec<String>,
+    env: Vec<String>,
+}
+
+fn curl_spawn() -> Spawn {
+    let args = [
         "-q",
         "--proto", "=https",
         "--proto-redir", "=https",
@@ -316,19 +367,31 @@ fn curl_command() -> Command {
         "-w", "%{redirect_url}",
         "-A", &format!("FlowBlur/{VERSION}"),
         LATEST_URL,
-    ]);
-    cmd
+    ];
+    Spawn { program: CURL.to_string(), args: args.iter().map(|a| a.to_string()).collect(), env: Vec::new() }
 }
 
-fn fetch_latest() -> Option<Version> {
-    parse_redirect(&run_capped(curl_command(), CURL_TIME_LIMIT, MAX_OUTPUT_BYTES).usable_output()?)
+/// `open` gets only `HOME` (when resolved) and a fixed `PATH`.
+fn open_spawn(home: Option<&Path>) -> Spawn {
+    let mut env: Vec<String> = home.and_then(Path::to_str).map(|h| format!("HOME={h}")).into_iter().collect();
+    env.push("PATH=/usr/bin:/bin".to_string());
+    Spawn { program: OPEN.to_string(), args: vec![RELEASES_URL.to_string()], env }
+}
+
+/// Runs `curl` with its output file in the (already checked) state directory `dir`.
+fn fetch_latest(dir: &Path) -> Option<Version> {
+    parse_redirect(&run_spawned(&curl_spawn(), Some(dir), CURL_TIME_LIMIT, MAX_OUTPUT_BYTES, &mut RealChildControl).usable_output()?)
 }
 
 fn real_ctx() -> Ctx {
+    let dir = state_dir();
     Ctx {
-        dir: state_dir(),
+        dir: dir.clone(),
         now: Box::new(unix_now),
-        fetch: Box::new(fetch_latest),
+        fetch: {
+            let dir = dir.clone();
+            Box::new(move || fetch_latest(dir.as_deref()?))
+        },
         log: Box::new(|line| {
             if diag::enabled() {
                 diag::append(line);
@@ -388,9 +451,7 @@ pub fn open_releases_page() {
         }
         let _ = std::thread::Builder::new().name("flowblur-open-releases".to_string()).spawn(|| {
             let _ = catch_unwind(|| {
-                let mut cmd = Command::new(OPEN);
-                cmd.arg(RELEASES_URL);
-                run_capped(cmd, OPEN_TIME_LIMIT, 0)
+                run_spawned(&open_spawn(home_dir().as_deref()), None, OPEN_TIME_LIMIT, 0, &mut RealChildControl)
             });
         });
     });
@@ -403,7 +464,7 @@ enum RunEnd {
     SpawnFailed,
     /// The child exited; the exit code, or `None` if a signal ended it.
     Exited(Option<i32>),
-    /// The time limit passed; the child was killed and reaped.
+    /// The time limit passed; the child was sent SIGKILL and waited for.
     TimedOut,
     /// The child had already been reaped by someone else (the host ignores SIGCHLD or calls
     /// `waitpid(-1)`), so its exit status is unknown.
@@ -416,9 +477,10 @@ enum RunEnd {
 struct RunResult {
     /// Read by the tests, which check that the child was reaped.
     #[cfg_attr(not(test), allow(dead_code))]
-    pid: Option<u32>,
+    pid: Option<libc::pid_t>,
     end: RunEnd,
-    /// Standard output, or `None` when it exceeded the cap or could not be read.
+    /// The child's standard output, or `None` when there was no output file, or it was over
+    /// the cap or failed the safety checks.
     output: Option<Vec<u8>>,
 }
 
@@ -435,82 +497,210 @@ impl RunResult {
     }
 }
 
+/// One `waitpid` result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Waited {
+    Running,
+    /// The child ended and was reaped; the raw wait status.
+    Ended(c_int),
+    /// `waitpid` failed with this errno (never EINTR, which is retried).
+    Error(c_int),
+}
+
 /// Waiting for and signalling a child, so tests can stand in for a host that reaps children
 /// itself and can see which signals are sent.
 trait ChildControl {
-    fn try_wait(&mut self, child: &mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>>;
-    fn kill(&mut self, child: &mut std::process::Child);
+    fn wait(&mut self, pid: libc::pid_t, block: bool) -> Waited;
+    fn kill(&mut self, pid: libc::pid_t);
 }
 
 struct RealChildControl;
 
 impl ChildControl for RealChildControl {
-    fn try_wait(&mut self, child: &mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>> {
-        child.try_wait()
+    fn wait(&mut self, pid: libc::pid_t, block: bool) -> Waited {
+        waitpid_once(pid, block)
     }
-    fn kill(&mut self, child: &mut std::process::Child) {
-        let _ = child.kill();
+    fn kill(&mut self, pid: libc::pid_t) {
+        // SAFETY: `kill(2)` takes plain integers and touches no memory of ours.
+        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 }
 
-/// Reads at most `cap` bytes; more than `cap` is `None`. Dropping the pipe afterwards makes a
-/// child that keeps writing fail on its next write.
-fn read_capped(out: impl Read, cap: usize) -> Option<Vec<u8>> {
-    let mut buf = Vec::new();
-    out.take(cap as u64 + 1).read_to_end(&mut buf).ok()?;
-    (buf.len() <= cap).then_some(buf)
+/// `waitpid(pid, &status, block ? 0 : WNOHANG)`, retried on EINTR.
+fn waitpid_once(pid: libc::pid_t, block: bool) -> Waited {
+    let options = if block { 0 } else { libc::WNOHANG };
+    loop {
+        let mut status: c_int = 0;
+        // SAFETY: `status` is a valid, writable `int` for the duration of the call.
+        let r = unsafe { libc::waitpid(pid, &mut status, options) };
+        if r == pid {
+            return Waited::Ended(status);
+        }
+        if r == 0 {
+            return Waited::Running;
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno != libc::EINTR {
+            return Waited::Error(errno);
+        }
+    }
 }
 
-/// Runs `cmd` (no shell) with stdin and stderr null and stdout piped and read up to `cap` bytes,
-/// killing it once `limit` has passed. The child is reaped here unless the host reaps it first.
-fn run_capped(cmd: Command, limit: Duration, cap: usize) -> RunResult {
-    run_capped_with(cmd, limit, cap, &mut RealChildControl)
+/// The exit code of a raw wait status, or `None` when a signal ended the child.
+fn exit_code(status: c_int) -> Option<i32> {
+    libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
 }
 
-fn run_capped_with(mut cmd: Command, limit: Duration, cap: usize, control: &mut dyn ChildControl) -> RunResult {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return RunResult { pid: None, end: RunEnd::SpawnFailed, output: None },
+/// A `posix_spawnattr_t`, destroyed on drop.
+struct SpawnAttr(libc::posix_spawnattr_t);
+
+impl SpawnAttr {
+    /// Close-on-exec for every descriptor not set up by the file actions, every signal reset to
+    /// its default action, and an empty signal mask.
+    fn new() -> Option<Self> {
+        let mut raw: libc::posix_spawnattr_t = std::ptr::null_mut();
+        // SAFETY: `raw` is a valid out-pointer; on success it owns an attribute object, which
+        // `Drop` destroys exactly once.
+        if unsafe { libc::posix_spawnattr_init(&mut raw) } != 0 {
+            return None;
+        }
+        let mut attr = SpawnAttr(raw);
+        let mut all: libc::sigset_t = 0;
+        let mut none: libc::sigset_t = 0;
+        // SAFETY: both point at local `sigset_t` values for the duration of the calls.
+        unsafe {
+            libc::sigfillset(&mut all);
+            libc::sigemptyset(&mut none);
+        }
+        let flags = (libc::POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_SETSIGMASK) as c_short;
+        // SAFETY: `attr.0` was initialised above; the set pointers are valid for each call and
+        // the values are copied into the attribute object.
+        let ok = unsafe {
+            libc::posix_spawnattr_setflags(&mut attr.0, flags) == 0
+                && libc::posix_spawnattr_setsigdefault(&mut attr.0, &all) == 0
+                && libc::posix_spawnattr_setsigmask(&mut attr.0, &none) == 0
+        };
+        ok.then_some(attr)
+    }
+}
+
+impl Drop for SpawnAttr {
+    fn drop(&mut self) {
+        // SAFETY: initialised by `posix_spawnattr_init` and destroyed only here.
+        unsafe { libc::posix_spawnattr_destroy(&mut self.0) };
+    }
+}
+
+/// A `posix_spawn_file_actions_t`, destroyed on drop.
+struct FileActions(libc::posix_spawn_file_actions_t);
+
+impl FileActions {
+    fn new() -> Option<Self> {
+        let mut raw: libc::posix_spawn_file_actions_t = std::ptr::null_mut();
+        // SAFETY: `raw` is a valid out-pointer; on success it owns a file-actions object, which
+        // `Drop` destroys exactly once.
+        (unsafe { libc::posix_spawn_file_actions_init(&mut raw) } == 0).then_some(FileActions(raw))
+    }
+
+    /// Makes the child open `path` as descriptor `fd`.
+    fn open(&mut self, fd: c_int, path: &CString, flags: c_int, mode: libc::mode_t) -> bool {
+        // SAFETY: `self.0` is initialised and `path` is a NUL-terminated string that the caller
+        // keeps alive until after `posix_spawn`.
+        unsafe { libc::posix_spawn_file_actions_addopen(&mut self.0, fd, path.as_ptr(), flags, mode) == 0 }
+    }
+}
+
+impl Drop for FileActions {
+    fn drop(&mut self) {
+        // SAFETY: initialised by `posix_spawn_file_actions_init` and destroyed only here.
+        unsafe { libc::posix_spawn_file_actions_destroy(&mut self.0) };
+    }
+}
+
+/// Starts `spawn` with `posix_spawn`: fd 0 from `/dev/null`, fd 2 to `/dev/null`, fd 1 to
+/// `/dev/null` or, with `out`, a new file created by the child (exclusive, no-follow, mode
+/// 0600) at `out`. Nothing else is inherited. Returns the child's pid.
+fn spawn_child(spawn: &Spawn, out: Option<&Path>) -> Option<libc::pid_t> {
+    use std::os::unix::ffi::OsStrExt;
+    let program = CString::new(spawn.program.as_str()).ok()?;
+    let argv: Vec<CString> = std::iter::once(Some(program.clone()))
+        .chain(spawn.args.iter().map(|a| CString::new(a.as_str()).ok()))
+        .collect::<Option<_>>()?;
+    let envv: Vec<CString> = spawn.env.iter().map(|e| CString::new(e.as_str()).ok()).collect::<Option<_>>()?;
+    let dev_null = CString::new("/dev/null").ok()?;
+    let out_path = match out {
+        Some(p) => CString::new(p.as_os_str().as_bytes()).ok()?,
+        None => dev_null.clone(),
     };
-    let pid = Some(child.id());
-    let deadline = Instant::now() + limit;
+    let out_flags = if out.is_some() {
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW
+    } else {
+        libc::O_WRONLY
+    };
 
-    // The pipe is read on its own thread so a child that never closes it cannot stall the
-    // time limit. If that thread cannot start, the pipe is closed and the output is `None`.
-    let (tx, rx) = std::sync::mpsc::channel();
-    if let Some(out) = child.stdout.take() {
-        let _ = std::thread::Builder::new().name("flowblur-update-read".to_string()).spawn(move || {
-            let read = catch_unwind(AssertUnwindSafe(|| read_capped(out, cap))).ok().flatten();
-            let _ = tx.send(read);
-        });
+    let attr = SpawnAttr::new()?;
+    let mut actions = FileActions::new()?;
+    if !(actions.open(0, &dev_null, libc::O_RDONLY, 0)
+        && actions.open(1, &out_path, out_flags, 0o600)
+        && actions.open(2, &dev_null, libc::O_WRONLY, 0))
+    {
+        return None;
     }
 
-    // Darwin `<sys/errno.h>`: no such child, i.e. it has already been reaped.
-    const ECHILD: i32 = 10;
+    // NULL-terminated pointer arrays into `argv` and `envv`, which outlive the call below.
+    let argv_ptrs: Vec<*mut c_char> = argv.iter().map(|a| a.as_ptr() as *mut c_char).chain(std::iter::once(std::ptr::null_mut())).collect();
+    let envp_ptrs: Vec<*mut c_char> = envv.iter().map(|e| e.as_ptr() as *mut c_char).chain(std::iter::once(std::ptr::null_mut())).collect();
+    let mut pid: libc::pid_t = 0;
+    // SAFETY: every pointer refers to live storage owned by this function (`program`, `argv`,
+    // `envv`, the two pointer arrays, `actions`, `attr`, `pid`); both arrays end in NULL; and
+    // `posix_spawn` does not write through `argv` or `envp` despite their `char *` type.
+    let err = unsafe { libc::posix_spawn(&mut pid, program.as_ptr(), &actions.0, &attr.0, argv_ptrs.as_ptr(), envp_ptrs.as_ptr()) };
+    (err == 0).then_some(pid)
+}
+
+/// Runs `spawn` with `limit` as a hard wall-clock limit. With `out_dir`, the child's standard
+/// output goes to a fresh file there, which is read (at most `cap` bytes, with the flag-file
+/// safety rules) after the child has ended and then removed on every path. The child is
+/// reaped here unless the host reaps it first; it is signalled only on timeout.
+fn run_spawned(spawn: &Spawn, out_dir: Option<&Path>, limit: Duration, cap: usize, control: &mut dyn ChildControl) -> RunResult {
+    let out = out_dir.map(|d| d.join(temp_name("out")));
+    let result = run_with_output(spawn, out.as_deref(), limit, cap, control);
+    if let Some(out) = &out {
+        let _ = std::fs::remove_file(out);
+    }
+    result
+}
+
+fn run_with_output(spawn: &Spawn, out: Option<&Path>, limit: Duration, cap: usize, control: &mut dyn ChildControl) -> RunResult {
+    let Some(pid) = spawn_child(spawn, out) else {
+        return RunResult { pid: None, end: RunEnd::SpawnFailed, output: None };
+    };
+    let deadline = Instant::now() + limit;
     let end = loop {
-        match control.try_wait(&mut child) {
-            Ok(Some(status)) => break RunEnd::Exited(status.code()),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
-            Ok(None) => {
-                // `try_wait` has just reported the child as running, so the pid is still ours.
-                control.kill(&mut child);
-                let _ = child.wait();
+        match control.wait(pid, false) {
+            Waited::Ended(status) => break RunEnd::Exited(exit_code(status)),
+            Waited::Running if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            Waited::Running => {
+                // A non-blocking wait has just found the child unreaped, so the pid still names
+                // it at that moment. A host that reaps children could reap it before the signal
+                // below and the pid could then be reused; without a process handle (macOS has
+                // none) that window cannot be closed, only kept short.
+                control.kill(pid);
+                // Blocking wait; ECHILD (reaped elsewhere meanwhile) is fine.
+                let _ = control.wait(pid, true);
                 break RunEnd::TimedOut;
             }
             // After a wait error the pid may already be free and reused, so no signal is sent.
-            Err(e) if e.raw_os_error() == Some(ECHILD) => break RunEnd::ReapedElsewhere,
-            Err(_) => break RunEnd::WaitFailed,
+            Waited::Error(libc::ECHILD) => break RunEnd::ReapedElsewhere,
+            Waited::Error(_) => break RunEnd::WaitFailed,
         }
     };
-    if end == RunEnd::WaitFailed {
-        // The child may still be running and holding the pipe, and its output is not used.
-        return RunResult { pid, end, output: None };
-    }
-    // The child is gone, so the pipe reaches end-of-file; the timeout only guards against a
-    // process the child left behind that still holds the pipe open.
-    let output = rx.recv_timeout(Duration::from_secs(1)).ok().flatten();
-    RunResult { pid, end, output }
+    let output = match (end, out) {
+        // The child may still be running, and its output is not used.
+        (RunEnd::WaitFailed, _) | (_, None) => None,
+        (_, Some(path)) => diag::read_regular_file_capped(path, cap),
+    };
+    RunResult { pid: Some(pid), end, output }
 }
 
 #[cfg(test)]
@@ -836,11 +1026,13 @@ mod tests {
         assert_eq!(probe.fetches.load(Ordering::SeqCst), 0);
         assert_eq!(available_update_in(Some(&dir), Some(v(0, 6, 0))), None);
 
-        // A regular file where the directory should be.
+        // A regular file where the directory should be: looking for the off switch fails with
+        // "not a directory", which counts as off.
         let t = TempDir::new();
         std::fs::write(t.state(), b"").unwrap();
-        let (ctx, _) = ctx_with(Some(t.state()), NOW, None);
-        assert_eq!(check_once(&ctx), Outcome::BadDir);
+        let (ctx, probe) = ctx_with(Some(t.state()), NOW, None);
+        assert_eq!(check_once(&ctx), Outcome::Off);
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 0);
 
         // No home directory: the feature is off.
         let (ctx, probe) = ctx_with(None, NOW, None);
@@ -974,6 +1166,25 @@ mod tests {
     }
 
     #[test]
+    fn off_switch_lookup_errors_count_as_off() {
+        let t = TempDir::new();
+        let dir = t.state();
+        put_state(&dir, &State { checked: 0, latest: Some(v(9, 0, 0)) });
+        // Without search permission the switch cannot be seen, so the feature is off.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(is_off(&dir));
+        let (ctx, probe) = ctx_with(Some(dir.clone()), NOW, Some(v(10, 0, 0)));
+        assert_eq!(check_once(&ctx), Outcome::Off);
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 0);
+        assert_eq!(available_update_in(Some(&dir), Some(v(0, 6, 0))), None);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!is_off(&dir));
+        // A missing directory or parent is "not found": not off.
+        assert!(!is_off(&t.0.join("missing")));
+        assert!(!is_off(&t.0.join("missing").join("deeper")));
+    }
+
+    #[test]
     fn two_starts_cause_one_fetch() {
         let t = TempDir::new();
         let once = Once::new();
@@ -988,141 +1199,297 @@ mod tests {
 
     // ── child processes ──
 
-    fn is_reaped(pid: u32) -> bool {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
+    fn sp(program: &str, args: &[&str], env: &[&str]) -> Spawn {
+        Spawn {
+            program: program.to_string(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+            env: env.iter().map(|e| e.to_string()).collect(),
         }
-        const ESRCH: i32 = 3;
+    }
+
+    fn sh(script: &str) -> Spawn {
+        sp("/bin/sh", &["-c", script], &[])
+    }
+
+    fn run(spawn: &Spawn, dir: &Path, limit: Duration) -> RunResult {
+        run_spawned(spawn, Some(dir), limit, MAX_OUTPUT_BYTES, &mut RealChildControl)
+    }
+
+    fn is_reaped(pid: libc::pid_t) -> bool {
         // SAFETY: signal 0 only checks whether the process exists; nothing is delivered.
-        let r = unsafe { kill(pid as i32, 0) };
-        r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(ESRCH)
+        let r = unsafe { libc::kill(pid, 0) };
+        r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// `/bin/sh` asking `lsof` for the shell's numeric descriptors. The trailing `; true` keeps
+    /// the shell from exec-ing `lsof` in its place (which would list `lsof`'s own descriptors),
+    /// and `ls /dev/fd` would list two descriptors of its own as well.
+    const LIST_FDS: &str = "/usr/sbin/lsof -a -p $$ -d 0-65535 -Ff; true";
+
+    fn fds_in(lsof_out: &[u8]) -> Vec<String> {
+        String::from_utf8_lossy(lsof_out).lines().filter_map(|l| l.strip_prefix('f')).map(str::to_string).collect()
+    }
+
+    #[test]
+    fn child_inherits_only_fds_0_1_2() {
+        use std::os::fd::AsRawFd;
+        let t = TempDir::new();
+        // Descriptors without close-on-exec, as a host might hold them: the lowest free one
+        // and one at 64 or above.
+        let file = std::fs::File::open("/dev/null").unwrap();
+        // SAFETY: F_DUPFD duplicates a valid descriptor; each copy has close-on-exec cleared.
+        let leaked = [3, 64].map(|min| unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, min) });
+        assert!(leaked.iter().all(|&fd| fd >= 3), "{leaked:?}");
+
+        // Control: a child started by std inherits them, so the stand-in detects a leak.
+        let std_out = std::process::Command::new("/bin/sh").args(["-c", LIST_FDS]).output().unwrap();
+        let r = run(&sh(LIST_FDS), &t.0, Duration::from_secs(20));
+        for fd in leaked {
+            // SAFETY: each is a descriptor this test opened and closes once.
+            unsafe { libc::close(fd) };
+        }
+
+        let std_seen = fds_in(&std_out.stdout);
+        assert!(leaked.iter().all(|fd| std_seen.contains(&fd.to_string())), "control: {std_seen:?}, leaked {leaked:?}");
+        assert_eq!(fds_in(&r.usable_output().unwrap()), ["0", "1", "2"]);
+        assert!(entries(&t.0).is_empty());
+    }
+
+    #[test]
+    fn child_environment_is_exactly_what_is_passed() {
+        let t = TempDir::new();
+        let env_of = |env: Vec<String>| {
+            let s = Spawn { program: "/usr/bin/env".to_string(), args: Vec::new(), env };
+            String::from_utf8(run(&s, &t.0, Duration::from_secs(10)).usable_output().unwrap()).unwrap()
+        };
+        // The test process has an environment of its own; none of it reaches the child.
+        assert!(std::env::vars_os().next().is_some());
+        assert_eq!(env_of(curl_spawn().env), "");
+        assert_eq!(env_of(open_spawn(Some(Path::new("/home-for-test"))).env), "HOME=/home-for-test\nPATH=/usr/bin:/bin\n");
+        assert_eq!(env_of(open_spawn(None).env), "PATH=/usr/bin:/bin\n");
+        assert_eq!(env_of(vec!["A=1".into(), "B=two words".into()]), "A=1\nB=two words\n");
+    }
+
+    #[test]
+    fn child_signal_dispositions_are_reset() {
+        let t = TempDir::new();
+        // The Rust runtime ignores SIGPIPE in this process (read here, not changed), and an
+        // ignored disposition survives exec unless it is reset.
+        let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: a null new action only reads the current one into `old`.
+        assert_eq!(unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut old) }, 0);
+        assert_eq!(old.sa_sigaction, libc::SIG_IGN, "precondition: SIGPIPE ignored in the test process");
+        // With the default action restored, the shell dies of its own SIGPIPE.
+        let r = run(&sh("kill -PIPE $$; echo survived"), &t.0, Duration::from_secs(10));
+        assert_eq!(r.end, RunEnd::Exited(None));
+        assert_eq!(r.output.as_deref(), Some(&b""[..]));
+    }
+
+    #[test]
+    fn child_signal_mask_is_empty() {
+        let t = TempDir::new();
+        // Block SIGUSR2 on this test thread only; posix_spawn would pass the caller's mask on.
+        let mut block: libc::sigset_t = 0;
+        let mut old: libc::sigset_t = 0;
+        // SAFETY: valid pointers to local sets; the change affects only this thread and is
+        // undone below.
+        unsafe {
+            libc::sigemptyset(&mut block);
+            libc::sigaddset(&mut block, libc::SIGUSR2);
+            assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut old), 0);
+        }
+        let r = run(&sh("/bin/ps -o sigmask= -p $$"), &t.0, Duration::from_secs(10));
+        // SAFETY: restores this thread's previous mask.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+        let out = String::from_utf8(r.usable_output().unwrap()).unwrap();
+        assert_eq!(out.trim(), "0", "{out:?}");
     }
 
     #[test]
     fn runner_kills_and_reaps_on_timeout() {
-        let mut cmd = Command::new("/bin/sleep");
-        cmd.arg("30");
+        let t = TempDir::new();
         let t0 = Instant::now();
-        let r = run_capped(cmd, Duration::from_millis(300), MAX_OUTPUT_BYTES);
+        let r = run(&sp("/bin/sleep", &["30"], &[]), &t.0, Duration::from_millis(300));
         assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
         assert_eq!(r.end, RunEnd::TimedOut);
         assert!(is_reaped(r.pid.unwrap()));
         assert_eq!(r.usable_output(), None);
+        assert!(entries(&t.0).is_empty(), "output file removed after a timeout");
     }
 
     #[test]
     fn runner_enforces_the_output_cap() {
-        // `yes` writes forever; the reader stops after the cap and closes the pipe.
-        let t0 = Instant::now();
-        let r = run_capped(Command::new("/usr/bin/yes"), Duration::from_secs(10), MAX_OUTPUT_BYTES);
-        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
-        assert_eq!(r.output, None);
-        assert!(is_reaped(r.pid.unwrap()));
-
-        // Exactly the cap is accepted, one byte more is not, even with exit status 0.
-        let mut ok = Command::new("/bin/sh");
-        ok.args(["-c", "head -c 1024 /dev/zero"]);
-        assert_eq!(run_capped(ok, Duration::from_secs(10), MAX_OUTPUT_BYTES).usable_output().map(|o| o.len()), Some(1024));
-        let mut over = Command::new("/bin/sh");
-        over.args(["-c", "head -c 1025 /dev/zero"]);
-        let r = run_capped(over, Duration::from_secs(10), MAX_OUTPUT_BYTES);
+        let t = TempDir::new();
+        let r = run(&sh("head -c 1024 /dev/zero"), &t.0, Duration::from_secs(10));
+        assert_eq!(r.usable_output().map(|o| o.len()), Some(1024));
+        let r = run(&sh("head -c 1025 /dev/zero"), &t.0, Duration::from_secs(10));
         assert_eq!(r.end, RunEnd::Exited(Some(0)));
         assert_eq!(r.usable_output(), None);
+        let r = run(&sh("head -c 1000000 /dev/zero"), &t.0, Duration::from_secs(10));
+        assert_eq!(r.usable_output(), None);
+        assert!(entries(&t.0).is_empty());
     }
 
     #[test]
-    fn runner_reports_only_successful_output() {
-        let mut echo = Command::new("/bin/echo");
-        echo.arg("hello");
-        assert_eq!(run_capped(echo, Duration::from_secs(10), MAX_OUTPUT_BYTES).usable_output(), Some(b"hello\n".to_vec()));
+    fn runner_reports_only_successful_output_and_removes_the_file() {
+        let t = TempDir::new();
+        let r = run(&sp("/bin/echo", &["hello"], &[]), &t.0, Duration::from_secs(10));
+        assert!(is_reaped(r.pid.unwrap()));
+        assert_eq!(r.usable_output(), Some(b"hello\n".to_vec()));
+        assert!(entries(&t.0).is_empty(), "removed after success");
 
-        let r = run_capped(Command::new("/usr/bin/false"), Duration::from_secs(10), MAX_OUTPUT_BYTES);
+        let r = run(&sp("/usr/bin/false", &[], &[]), &t.0, Duration::from_secs(10));
         assert_eq!(r.end, RunEnd::Exited(Some(1)));
         assert!(is_reaped(r.pid.unwrap()));
 
-        let mut fail = Command::new("/bin/sh");
-        fail.args(["-c", &format!("printf '{TAG_URL_PREFIX}v9.9.9'; exit 3")]);
-        let r = run_capped(fail, Duration::from_secs(10), MAX_OUTPUT_BYTES);
+        let r = run(&sh(&format!("printf '{TAG_URL_PREFIX}v9.9.9'; exit 3")), &t.0, Duration::from_secs(10));
         assert_eq!(r.end, RunEnd::Exited(Some(3)));
         assert_eq!(r.usable_output(), None);
+        assert!(entries(&t.0).is_empty(), "removed after failure");
 
-        let mut killed = Command::new("/bin/sh");
-        killed.args(["-c", &format!("printf '{TAG_URL_PREFIX}v9.9.9'; kill -9 $$")]);
-        assert_eq!(run_capped(killed, Duration::from_secs(10), MAX_OUTPUT_BYTES).usable_output(), None);
+        let r = run(&sh(&format!("printf '{TAG_URL_PREFIX}v9.9.9'; kill -9 $$")), &t.0, Duration::from_secs(10));
+        assert_eq!(r.end, RunEnd::Exited(None));
+        assert_eq!(r.usable_output(), None);
 
-        let r = run_capped(Command::new("/nonexistent-fbuc-binary"), Duration::from_secs(1), MAX_OUTPUT_BYTES);
-        assert_eq!((r.end, r.pid), (RunEnd::SpawnFailed, None));
+        // Spawn failures: missing program, NUL in an argument, missing output directory.
+        for (spawn, dir) in [
+            (sp("/nonexistent-fbuc-binary", &[], &[]), t.0.clone()),
+            (sp("/bin/echo", &["a\0b"], &[]), t.0.clone()),
+            (sp("/bin/echo", &["x"], &["A=\0"]), t.0.clone()),
+            (sp("/bin/echo", &["x"], &[]), t.0.join("missing")),
+        ] {
+            let r = run(&spawn, &dir, Duration::from_secs(1));
+            assert_eq!((r.end, r.pid), (RunEnd::SpawnFailed, None), "{spawn:?}");
+        }
+        assert!(entries(&t.0).is_empty(), "removed after spawn failures");
+
+        // Without an output directory, stdout goes to /dev/null.
+        let r = run_spawned(&sp("/bin/echo", &["x"], &[]), None, Duration::from_secs(10), 0, &mut RealChildControl);
+        assert_eq!((r.end, r.output), (RunEnd::Exited(Some(0)), None));
+    }
+
+    #[test]
+    fn output_file_is_created_by_the_child_exclusively_with_mode_0600() {
+        use std::os::unix::fs::MetadataExt;
+        let t = TempDir::new();
+        let out = t.0.join(".update-check.test.out");
+        // `run_with_output` leaves the file in place, so it can be inspected here.
+        let r = run_with_output(&sp("/bin/echo", &["x"], &[]), Some(&out), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut RealChildControl);
+        assert_eq!(r.usable_output().as_deref(), Some(&b"x\n"[..]));
+        let meta = std::fs::symlink_metadata(&out).unwrap();
+        assert!(meta.is_file());
+        assert_eq!(meta.mode() & 0o777, 0o600);
+        assert_eq!(meta.uid(), diag::current_euid());
+
+        // An existing file or a symlink at that name is never written through.
+        let r = run_with_output(&sp("/bin/echo", &["y"], &[]), Some(&out), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut RealChildControl);
+        assert_eq!(r.end, RunEnd::SpawnFailed);
+        assert_eq!(std::fs::read(&out).unwrap(), b"x\n");
+        std::fs::remove_file(&out).unwrap();
+        let target = t.0.join("target");
+        symlink(&target, &out).unwrap();
+        let r = run_with_output(&sp("/bin/echo", &["z"], &[]), Some(&out), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut RealChildControl);
+        assert_eq!(r.end, RunEnd::SpawnFailed);
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn leftover_sweep_removes_only_old_temporary_and_output_files() {
+        let t = TempDir::new();
+        let dir = &t.0;
+        let now = SystemTime::now();
+        let old = now - LEFTOVER_AGE - Duration::from_secs(60);
+        let fresh = now - LEFTOVER_AGE + Duration::from_secs(60);
+        let make = |name: &str, mtime: SystemTime| {
+            let f = std::fs::File::create(dir.join(name)).unwrap();
+            f.set_modified(mtime).unwrap();
+        };
+        make(".update-check.1.2.tmp", old);
+        make(".update-check.1.3.out", old);
+        make(".update-check.1.4.tmp", fresh);
+        make(".update-check.1.5.out", fresh);
+        make("update-check", old);
+        make("no-update-check", old);
+        make(".update-check.1.6.txt", old);
+        make(".other.1.7.tmp", old);
+        std::fs::create_dir(dir.join(".update-check.9.9.out")).unwrap();
+        sweep_leftovers(dir, now);
+        assert_eq!(
+            entries(dir),
+            [".other.1.7.tmp", ".update-check.1.4.tmp", ".update-check.1.5.out", ".update-check.1.6.txt", ".update-check.9.9.out", "no-update-check", "update-check"]
+        );
+    }
+
+    #[test]
+    fn check_past_the_gate_sweeps_leftovers() {
+        let t = TempDir::new();
+        let dir = t.state();
+        put_state(&dir, &State { checked: 0, latest: None });
+        let f = std::fs::File::create(dir.join(".update-check.1.1.out")).unwrap();
+        f.set_modified(SystemTime::now() - 2 * LEFTOVER_AGE).unwrap();
+        let (ctx, _) = ctx_with(Some(dir.clone()), NOW, None);
+        assert_eq!(check_once(&ctx), Outcome::Fetched(None));
+        assert_eq!(entries(&dir), [STATE_FILE]);
     }
 
     /// Stands in for a host that reaps children itself (SIGCHLD ignored, or its own
-    /// `waitpid`): before the runner's first wait it reaps the child with a blocking `waitpid` on
-    /// the child's pid, so the runner's real `Child::try_wait` then fails with ECHILD. With
-    /// `other_error`, it reports a different wait error instead. It counts kill requests.
+    /// `waitpid`): before the runner's first wait it reaps the child with a blocking `waitpid`,
+    /// so the runner's real non-blocking `waitpid` then fails with ECHILD. With `other_error`,
+    /// it reports a different wait error instead. It counts kill requests.
     struct HostReaps {
         other_error: bool,
         kills: usize,
     }
 
     impl ChildControl for HostReaps {
-        fn try_wait(&mut self, child: &mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>> {
-            unsafe extern "C" {
-                fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
-            }
-            let pid = child.id() as i32;
-            let mut status = 0;
-            // SAFETY: `status` is a valid out-pointer; this reaps only our own child.
-            assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        fn wait(&mut self, pid: libc::pid_t, block: bool) -> Waited {
+            assert!(!block, "only the timeout path waits blocking");
+            assert!(matches!(waitpid_once(pid, true), Waited::Ended(_)));
             if self.other_error {
-                const EINVAL: i32 = 22;
-                return Err(std::io::Error::from_raw_os_error(EINVAL));
+                return Waited::Error(libc::EINVAL);
             }
-            child.try_wait()
+            waitpid_once(pid, false)
         }
-        fn kill(&mut self, _: &mut std::process::Child) {
+        fn kill(&mut self, _: libc::pid_t) {
             self.kills += 1;
         }
     }
 
-    fn printf_cmd(text: &str, exit: i32) -> Command {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", &format!("printf '{text}'; exit {exit}")]);
-        cmd
-    }
-
     #[test]
     fn output_is_used_when_the_host_reaps_the_child() {
+        let t = TempDir::new();
         let url = format!("{TAG_URL_PREFIX}v0.7.0");
         // The exit status is unknown once someone else has reaped the child; the output is used
         // and validated by the parser.
         for exit in [0, 3] {
             let mut host = HostReaps { other_error: false, kills: 0 };
-            let r = run_capped_with(printf_cmd(&url, exit), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
+            let r = run_spawned(&sh(&format!("printf '{url}'; exit {exit}")), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
             assert_eq!(r.end, RunEnd::ReapedElsewhere);
             assert_eq!(host.kills, 0, "no signal after a wait error");
             assert!(is_reaped(r.pid.unwrap()));
             assert_eq!(r.usable_output().as_deref().and_then(parse_redirect), Some(v(0, 7, 0)));
         }
 
-        // Unexpected output is still no information.
+        // Unexpected or over-cap output is still no information.
         let mut host = HostReaps { other_error: false, kills: 0 };
-        let r = run_capped_with(printf_cmd("https://example.com/", 0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
+        let r = run_spawned(&sh("printf 'https://example.com/'"), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
         assert_eq!(r.end, RunEnd::ReapedElsewhere);
         assert_eq!(r.usable_output().as_deref().and_then(parse_redirect), None);
-
-        // An over-cap output is still no information.
-        let mut host = HostReaps { other_error: false, kills: 0 };
-        let r = run_capped_with(Command::new("/usr/bin/yes"), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
+        let r = run_spawned(&sh("head -c 5000 /dev/zero"), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
         assert_eq!((r.end, host.kills), (RunEnd::ReapedElsewhere, 0));
         assert_eq!(r.usable_output(), None);
+        assert!(entries(&t.0).is_empty());
     }
 
     #[test]
     fn other_wait_errors_send_no_signal_and_give_no_information() {
+        let t = TempDir::new();
         let mut host = HostReaps { other_error: true, kills: 0 };
-        let r = run_capped_with(printf_cmd(&format!("{TAG_URL_PREFIX}v0.7.0"), 0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
+        let r = run_spawned(&sh(&format!("printf '{TAG_URL_PREFIX}v0.7.0'")), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut host);
         assert_eq!(r.end, RunEnd::WaitFailed);
         assert_eq!(host.kills, 0, "no signal after a wait error");
         assert_eq!(r.usable_output(), None);
+        assert!(entries(&t.0).is_empty());
     }
 
     #[test]
@@ -1130,24 +1497,32 @@ mod tests {
         /// The real wait and kill, counting kill requests.
         struct Counting(usize);
         impl ChildControl for Counting {
-            fn try_wait(&mut self, child: &mut std::process::Child) -> std::io::Result<Option<std::process::ExitStatus>> {
-                child.try_wait()
+            fn wait(&mut self, pid: libc::pid_t, block: bool) -> Waited {
+                waitpid_once(pid, block)
             }
-            fn kill(&mut self, child: &mut std::process::Child) {
+            fn kill(&mut self, pid: libc::pid_t) {
                 self.0 += 1;
-                let _ = child.kill();
+                RealChildControl.kill(pid);
             }
         }
-        let mut sleep = Command::new("/bin/sleep");
-        sleep.arg("30");
+        let t = TempDir::new();
         let mut c = Counting(0);
-        let r = run_capped_with(sleep, Duration::from_millis(200), MAX_OUTPUT_BYTES, &mut c);
+        let r = run_spawned(&sp("/bin/sleep", &["30"], &[]), Some(&t.0), Duration::from_millis(200), MAX_OUTPUT_BYTES, &mut c);
         assert_eq!((r.end, c.0), (RunEnd::TimedOut, 1));
         assert!(is_reaped(r.pid.unwrap()));
 
         let mut c = Counting(0);
-        let r = run_capped_with(Command::new("/usr/bin/true"), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut c);
+        let r = run_spawned(&sp("/usr/bin/true", &[], &[]), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut c);
         assert_eq!((r.end, c.0), (RunEnd::Exited(Some(0)), 0));
+    }
+
+    #[test]
+    fn wait_status_decoding() {
+        assert_eq!(exit_code(0), Some(0));
+        assert_eq!(exit_code(3 << 8), Some(3));
+        assert_eq!(exit_code(255 << 8), Some(255));
+        assert_eq!(exit_code(libc::SIGKILL), None);
+        assert_eq!(exit_code(libc::SIGTERM | 0o200), None);
     }
 
     #[test]
@@ -1183,19 +1558,30 @@ mod tests {
     }
 
     #[test]
-    fn curl_command_line() {
-        let cmd = curl_command();
-        assert_eq!(cmd.get_program(), CURL);
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap().to_string()).collect();
+    fn curl_and_open_command_lines() {
+        let c = curl_spawn();
+        assert_eq!(c.program, CURL);
         let ua = format!("FlowBlur/{VERSION}");
         let want = [
             "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--connect-timeout", "5",
             "--max-time", "8", "--max-redirs", "0", "-sS", "-o", "/dev/null", "-w", "%{redirect_url}",
             "-A", &ua, LATEST_URL,
         ];
-        assert_eq!(args, want);
-        assert_eq!(args[0], "-q", "-q only works as the first argument");
-        assert_eq!(cmd.get_envs().count(), 0);
+        assert_eq!(c.args, want);
+        assert_eq!(c.args[0], "-q", "-q only works as the first argument");
+        assert!(c.env.is_empty());
+
+        // Checked as data only: running it would open a browser window.
+        let o = open_spawn(Some(Path::new("/home-for-test")));
+        assert_eq!(o, sp(OPEN, &[RELEASES_URL], &["HOME=/home-for-test", "PATH=/usr/bin:/bin"]));
+        assert_eq!(open_spawn(None).env, ["PATH=/usr/bin:/bin"]);
+    }
+
+    #[test]
+    fn tests_never_resolve_the_real_home() {
+        assert_eq!(home_dir(), None);
+        assert_eq!(state_dir(), None);
+        assert_eq!(available_update(), None);
     }
 
     /// Runs the real `curl` against GitHub and prints what it parsed. Run by hand:
@@ -1203,11 +1589,13 @@ mod tests {
     #[test]
     #[ignore]
     fn live_fetch() {
-        let r = run_capped(curl_command(), CURL_TIME_LIMIT, MAX_OUTPUT_BYTES);
+        let t = TempDir::new();
+        let r = run(&curl_spawn(), &t.0, CURL_TIME_LIMIT);
         println!("end={:?} output_bytes={:?}", r.end, r.output.as_ref().map(Vec::len));
         match r.usable_output().as_deref().and_then(parse_redirect) {
             Some(v) => println!("latest release: {v}"),
             None => println!("no information (no release, no network, or an unexpected reply)"),
         }
+        assert!(entries(&t.0).is_empty());
     }
 }

@@ -269,6 +269,7 @@ dependencies = [
  "after-effects",
  "block2",
  "flowblur-core",
+ "libc",
  "objc2",
  "objc2-foundation",
  "objc2-metal",

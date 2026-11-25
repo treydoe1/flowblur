@@ -24,6 +24,9 @@ flowblur-core = { path = "../core", default-features = false }
 rayon = "1.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# posix_spawn, waitpid and kill for the update check's child processes (already in the
+# dependency tree through other crates).
+libc = "0.2.191"
 premiere = { git = "https://github.com/virtualritz/after-effects", rev = "c2eb86609b293f046b18bc3e18e110dcc9ae9f17" }
 block2 = "0.6"
 objc2 = "0.6"

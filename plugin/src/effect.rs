@@ -193,7 +193,7 @@ impl AdobePluginGlobal for Plugin {
                 // The click only opens the release page: it changes no value and asks for no
                 // re-render (no PF_ChangeFlag_CHANGED_VALUE, no PF_OutFlag_FORCE_RERENDER).
                 #[cfg(target_os = "macos")]
-                if params.index(FbParam::UpdateNotice) == Some(param_index) {
+                if is_update_button(params.index(FbParam::UpdateNotice), param_index) {
                     crate::update_check::open_releases_page();
                 }
             }
@@ -245,6 +245,12 @@ fn available_update_text() -> Option<String> {
     {
         None
     }
+}
+
+/// True when the changed PF parameter index is the update button's (`button_index`, from the
+/// parameter map; `None` if the map does not know it).
+fn is_update_button(button_index: Option<usize>, changed_index: usize) -> bool {
+    button_index == Some(changed_index)
 }
 
 /// The About box text, with a line naming a newer release when one is known.
@@ -1869,7 +1875,8 @@ mod tests {
         // The seven existing parameters keep the flags they always had (none).
         assert!(added.iter().take(7).all(|a| a.2 == 0), "{added:?}");
         assert_eq!(added[7].2, (sys::PF_ParamFlag_SUPERVISE | sys::PF_ParamFlag_CANNOT_TIME_VARY) as i32);
-        assert!(added[7].3 == format!("FlowBlur {VERSION}") || added[7].3 == "Update available", "{}", added[7].3);
+        // Tests never resolve the home directory, so no stored result is read.
+        assert_eq!(added[7].3, format!("FlowBlur {VERSION}"));
 
         // PF indices (input layer = 0) of each parameter, as the click handler sees them.
         let order = [
@@ -1900,6 +1907,17 @@ mod tests {
         assert_eq!(gpu(FbParam::UseSourceRate), GPU_PARAM_USE_SOURCE_RATE);
         assert_eq!(gpu(FbParam::UpdateNotice), 7);
         assert_eq!((GPU_PARAM_BLUR_AMOUNT, GPU_PARAM_USE_SOURCE_RATE), (0, 6));
+    }
+
+    #[test]
+    fn only_the_button_index_opens_the_release_page() {
+        let (_, params) = run_params_setup();
+        let button = params.index(FbParam::UpdateNotice);
+        assert_eq!(button, Some(8));
+        let opening: Vec<usize> = (0..=20).filter(|&i| is_update_button(button, i)).collect();
+        assert_eq!(opening, [8]);
+        assert!(!is_update_button(None, 8));
+        assert!(!is_update_button(None, 0));
     }
 
     #[test]

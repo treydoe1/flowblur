@@ -163,19 +163,24 @@ CPU effect path.
 ## Update check
 
 When Premiere Pro or After Effects loads the plug-in, FlowBlur checks at most once every 24
-hours whether a newer release exists:
+hours whether a newer release exists. The same happens in any other program that loads the
+plug-in, for example Adobe Media Encoder; the shared check time usually keeps them from all
+checking.
 
 - It makes one HTTPS request to github.com, asking for
   `https://github.com/treydoe1/flowblur/releases/latest`, and reads only the address GitHub
   redirects to, which names the latest release's version. The request runs in the system
   `curl` program in the background, so loading the plug-in does not wait for it.
+  A network monitor therefore shows the request as coming from `curl`. Proxy settings are not
+  used, so behind a proxy the check finds nothing.
 - GitHub can see your IP address and the client name `FlowBlur/<version>`. Nothing about your
   projects, footage or computer is sent.
 - Nothing is downloaded or installed. When the release is newer than the installed version,
   the About text and the last parameter row say so; installing it is up to you.
 - The time of the last check and the latest version seen are kept in
-  `~/Library/Application Support/FlowBlur/update-check`. A notice appears the next time the
-  plug-in is loaded after a check found a newer release.
+  `~/Library/Application Support/FlowBlur/update-check`. The About text shows a newer release
+  as soon as a check has found it, even in the same session; the parameter row changes the
+  next time the plug-in is loaded.
 
 To turn the check off (no request and no notice):
 
