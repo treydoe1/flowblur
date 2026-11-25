@@ -76,9 +76,9 @@ plugin/build.sh
 ```
 
 This compiles the effect in release mode and writes a code-signed bundle to
-`dist/FlowBlur.plugin` at the top of the repository. It uses an "Apple Development" signing
-identity if your keychain has one, and an ad-hoc signature otherwise (Premiere Pro refuses
-unsigned plug-ins). The script installs nothing.
+`dist/FlowBlur.plugin` at the top of the repository. It uses a "Developer ID Application" or
+else an "Apple Development" signing identity if your keychain has one, and an ad-hoc signature
+otherwise (Premiere Pro refuses unsigned plug-ins). The script installs nothing.
 
 Build the installer package:
 
@@ -88,7 +88,7 @@ packaging/build_pkg.sh --no-build # packages the existing dist/FlowBlur.plugin
 ```
 
 This writes `dist/FlowBlur-<version>.pkg`. The package is signed only if a "Developer ID
-Installer" identity is in your keychain, and it is not notarized.
+Installer" identity is in your keychain, and it is notarized only with `--notarize` (see below).
 
 To install a bundle you built without making a package, copy it (a real copy, not an alias or
 symlink) into the plug-in folder and restart Premiere Pro:
@@ -106,6 +106,45 @@ The repository has three parts:
 - `plugin/`: the Premiere Pro effect, which reads frames from the host, calls the engine and
   writes the result.
 - `packaging/`: the installer package build, its preinstall script, and the uninstall script.
+
+### Signed and notarized release
+
+A package that opens with a normal double-click needs an Apple Developer Program membership
+with two certificates in your keychain, "Developer ID Application" (for the plug-in bundle)
+and "Developer ID Installer" (for the package), and Apple's notary service.
+
+Once, store your notary service credentials in the keychain under a profile name of your
+choice (it asks for your Apple ID, team ID and an app-specific password; an App Store Connect
+API key works too, see `xcrun notarytool store-credentials --help`):
+
+```sh
+xcrun notarytool store-credentials flowblur-notary
+```
+
+Then build, sign, notarize and staple in one step:
+
+```sh
+packaging/build_pkg.sh --notarize flowblur-notary
+```
+
+Before uploading anything, the script checks that the package is signed with a Developer ID
+Installer identity and that the bundle in it is signed with a Developer ID Application identity,
+the hardened runtime and a secure timestamp, and names any requirement that is missing. It fails
+if Apple does not accept the package (and prints Apple's log), or if stapling or the Gatekeeper
+check fails.
+
+Settings, as environment variables:
+
+- `FLOWBLUR_SIGN_IDENTITY`: the identity `plugin/build.sh` signs the bundle with, as a name or
+  SHA-1 hash (`security find-identity -v -p codesigning` lists them); `-` forces an ad-hoc
+  signature. Without it, the first Developer ID Application identity is used, else the first
+  Apple Development identity, else ad-hoc.
+- `FLOWBLUR_INSTALLER_IDENTITY`: the name of the identity the package is signed with; `-`
+  leaves it unsigned. Without it, the first Developer ID Installer identity is used, else none.
+- `FLOWBLUR_NOTARY_PROFILE`: the same as `--notarize <profile>`.
+
+A Developer ID signature carries the certificate holder's name and team ID, and anyone can read
+them from the package and the bundle (`pkgutil --check-signature`, `codesign -dvv`).
 
 ## Parameters
 

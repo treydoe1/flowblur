@@ -3,7 +3,9 @@
 #   Contents/MacOS/FlowBlur          the arm64 cdylib (exports EffectMain)
 #   Contents/Resources/FlowBlur.rsrc the PiPL resource produced by build.rs (pipl crate)
 #   Contents/PkgInfo, Contents/Info.plist (also from the pipl crate)
-# then sets CFBundleIdentifier and ad-hoc codesigns it (Premiere/AE 25.2+ refuse unsigned plug-ins).
+# then sets CFBundleIdentifier and codesigns it (Premiere/AE 25.2+ refuse unsigned plug-ins):
+# with FLOWBLUR_SIGN_IDENTITY if set, else a Developer ID Application or Apple Development
+# identity from the keychain, else ad-hoc. See "Signing identity" below.
 # Mirrors the create_bundle recipe of the after-effects bindings' AdobePlugin.just, arm64 only.
 #
 # This script installs NOTHING. To install, copy (a real copy, not an alias/symlink) the bundle to
@@ -64,15 +66,42 @@ PLIST="$BUNDLE/Contents/Info.plist"
                         -c "Add :CFBundleVersion string $VERSION" \
                         -c "Add :CFBundleInfoDictionaryVersion string 6.0" "$PLIST"
 
-# Same flags as the reference recipe; ad-hoc identity unless an Apple Development cert exists.
-DEV_CERT="$(security find-identity -v -p codesigning 2>/dev/null | grep -m 1 "Apple Development" | awk '{print $2}' || true)"
-if [[ -n "$DEV_CERT" ]]; then
-    codesign --force --options runtime --timestamp --strict --sign "$DEV_CERT" "$BUNDLE"
+# Signing identity, first match wins:
+#   FLOWBLUR_SIGN_IDENTITY (name or SHA-1 hash, passed to codesign as is; "-" forces ad-hoc),
+#   the first valid "Developer ID Application" identity (needed for notarization),
+#   the first valid "Apple Development" identity, otherwise ad-hoc.
+# A given identity that codesign cannot use is an error, never a silent fallback.
+# Keychain identities are passed by SHA-1 hash, so equal names cannot pick the wrong one.
+first_identity() {
+    security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' -v kind="$1" 'index($2, kind ": ") == 1 && !n++ { split($1, f, " "); print f[2] }' || true
+}
+SIGN_ID="${FLOWBLUR_SIGN_IDENTITY:-}"
+[[ -n "$SIGN_ID" ]] || SIGN_ID="$(first_identity "Developer ID Application")"
+[[ -n "$SIGN_ID" ]] || SIGN_ID="$(first_identity "Apple Development")"
+[[ -n "$SIGN_ID" ]] || SIGN_ID=-
+
+# Same flags as the reference recipe. A real identity also gets the hardened runtime and a secure
+# timestamp, which notarization requires.
+if [[ "$SIGN_ID" != "-" ]]; then
+    codesign --force --options runtime --timestamp --strict --sign "$SIGN_ID" "$BUNDLE"
 else
     codesign --force --options runtime --strict --sign - "$BUNDLE"
-    echo "Note: ad-hoc signature. For distribution use a Developer ID certificate and notarize."
 fi
 codesign --verify --deep --strict "$BUNDLE"
+
+# Report the kind of signature from the signed bundle itself (its leaf certificate's name).
+AUTHORITY="$(codesign -dvv "$BUNDLE" 2>&1 | awk -F= '$1 == "Authority" && !n++ { print $2 }')"
+case "$AUTHORITY" in
+    "")
+        echo "Signature: ad-hoc"
+        echo "Note: ad-hoc signature. For distribution use a Developer ID certificate and notarize." ;;
+    "Developer ID Application: "*)
+        echo "Signature: Developer ID Application (hardened runtime, secure timestamp)" ;;
+    *)
+        echo "Signature: ${AUTHORITY%%:*} (hardened runtime, secure timestamp)"
+        echo "Note: not a Developer ID signature, so a package of this bundle cannot be notarized." ;;
+esac
 
 if find "$BUNDLE" -type l | grep -q .; then
     echo "error: bundle contains symlinks" >&2; exit 1

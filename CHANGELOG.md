@@ -10,6 +10,8 @@
 - New last parameter: a button that opens the release page (row name `FlowBlur <version>`, or
   "Update available"). The seven existing parameters are unchanged, so existing projects keep
   their settings.
+- Build scripts: the plug-in and installer package can be signed with an Apple Developer ID,
+  and `packaging/build_pkg.sh --notarize <profile>` notarizes and staples the package.
 
 ## 0.5.1
 
