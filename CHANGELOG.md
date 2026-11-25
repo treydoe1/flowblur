@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- Update notice: at most once every 24 hours, when the host loads the plug-in, FlowBlur asks
+  GitHub for the version of the latest release. When it is newer, the About text says so and
+  the last parameter row reads "Update available" with a button that opens the release page.
+  Nothing is downloaded or installed. The file
+  `~/Library/Application Support/FlowBlur/no-update-check` turns the check off.
+- New last parameter: a button that opens the release page (row name `FlowBlur <version>`, or
+  "Update available"). The seven existing parameters are unchanged, so existing projects keep
+  their settings.
+
 ## 0.5.1
 
 First public version (alpha).

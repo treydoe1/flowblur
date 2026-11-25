@@ -1188,6 +1188,8 @@ unsafe fn maybe_dump_segment_graph(
 /// * PF 5 -> GPU 4: LinearLight (CheckBox, default true)
 /// * PF 6 -> GPU 5: View (Popup 0-based: 0=Output, 1=MotionVectors, default 0)
 /// * PF 7 -> GPU 6: UseSourceRate (CheckBox, default true; unused on adjustment layers)
+/// * PF 8 -> GPU 7: UpdateNotice (Button, no value; never read here). It is the last
+///   parameter, so it cannot shift the indices above (pinned by a test in `effect.rs`).
 pub const GPU_PARAM_BLUR_AMOUNT: i32 = 0;
 pub const GPU_PARAM_MOTION_SENSITIVITY: i32 = 1;
 pub const GPU_PARAM_MAX_BLUR: i32 = 2;

@@ -55,6 +55,9 @@ pub enum FbParam {
     View,
     /// Premiere only: pick neighbours at source-frame spacing (see `neighbors`). Off = legacy.
     UseSourceRate,
+    /// A button that opens the release page; its row shows the update notice (see
+    /// `update_check`). It has no value and is never read by the render paths.
+    UpdateNotice,
 }
 
 impl FbParam {
@@ -67,6 +70,7 @@ impl FbParam {
             FbParam::LinearLight => 5,
             FbParam::View => 6,
             FbParam::UseSourceRate => 7,
+            FbParam::UpdateNotice => 8,
         }
     }
 }
@@ -130,15 +134,29 @@ impl AdobePluginGlobal for Plugin {
             f.set_default(true);
             f.set_value(true);
         }))?;
+        // Always last, so it cannot shift the indices the GPU filter reads. The labels are
+        // chosen once here from the stored result of an earlier check.
+        let (name, label) = notice_labels(available_update_text().as_deref());
+        params.add_customized(FbParam::UpdateNotice, &name, ae::ButtonDef::setup(|b| {
+            b.set_label(&label);
+        }), |pd| {
+            pd.set_id(FbParam::UpdateNotice.disk_id());
+            // SUPERVISE delivers the click as PF_Cmd_USER_CHANGED_PARAM; a button has no value,
+            // and CANNOT_TIME_VARY keeps any keyframe control off its row.
+            pd.set_flags(ae::ParamFlag::SUPERVISE | ae::ParamFlag::CANNOT_TIME_VARY);
+            -1
+        })?;
         Ok(())
     }
 
     fn handle_command(&self, cmd: ae::Command, in_data: ae::InData, mut out_data: ae::OutData, params: &mut ae::Parameters<FbParam>) -> Result<(), ae::Error> {
         match cmd {
             ae::Command::About => {
-                out_data.set_return_msg(&format!("FlowBlur {VERSION}\rOptical-flow motion blur."));
+                out_data.set_return_msg(&about_text(available_update_text().as_deref()));
             }
             ae::Command::GlobalSetup => {
+                #[cfg(target_os = "macos")]
+                crate::update_check::start_background_check();
                 // Out-flags are written by define_effect! from the same PIPL_OUTFLAGS* values that
                 // are compiled into the PiPL, so the two always agree.
                 let summary = if in_data.is_premiere() {
@@ -170,8 +188,14 @@ impl AdobePluginGlobal for Plugin {
             ae::Command::UpdateParamsUi => {
                 record_pf_instance_synthetic(&in_data, "update_params_ui");
             }
-            ae::Command::UserChangedParam { .. } => {
+            ae::Command::UserChangedParam { param_index } => {
                 record_pf_instance_synthetic(&in_data, "user_changed_param");
+                // The click only opens the release page: it changes no value and asks for no
+                // re-render (no PF_ChangeFlag_CHANGED_VALUE, no PF_OutFlag_FORCE_RERENDER).
+                #[cfg(target_os = "macos")]
+                if params.index(FbParam::UpdateNotice) == Some(param_index) {
+                    crate::update_check::open_releases_page();
+                }
             }
             ae::Command::Render { in_layer, mut out_layer } => {
                 let log = diag::enabled();
@@ -208,6 +232,36 @@ impl AdobePluginGlobal for Plugin {
             _ => {}
         }
         Ok(())
+    }
+}
+
+/// The newer release found by an earlier update check, as `x.y.z`.
+fn available_update_text() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::update_check::available_update().map(|v| v.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The About box text, with a line naming a newer release when one is known.
+fn about_text(update: Option<&str>) -> String {
+    let mut s = format!("FlowBlur {VERSION}\rOptical-flow motion blur.");
+    if let Some(v) = update {
+        s += &format!("\rVersion {v} is available: github.com/treydoe1/flowblur/releases");
+    }
+    s
+}
+
+/// Row name and button label of the `UpdateNotice` parameter. Both fit the host's 31-byte
+/// limit for any version the update check accepts.
+fn notice_labels(update: Option<&str>) -> (String, String) {
+    match update {
+        Some(v) => ("Update available".to_string(), format!("Get {v}")),
+        None => (format!("FlowBlur {VERSION}"), "Release Notes".to_string()),
     }
 }
 
@@ -1769,6 +1823,98 @@ mod tests {
     const VERIFIED: SourceState = SourceState { verdict: Verdict::Verified, strikes: 0 };
 
     // ── legacy / After Effects ──
+
+    thread_local! {
+        /// (param_type, disk id, flags, name) of each PF_ADD_PARAM call, in order.
+        static ADDED: RefCell<Vec<(sys::PF_ParamType, i32, i32, String)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    unsafe extern "C" fn fake_add_param(_: sys::PF_ProgPtr, index: sys::PF_ParamIndex, def: sys::PF_ParamDefPtr) -> sys::PF_Err {
+        assert_eq!(index, -1);
+        // SAFETY: `def` points at the PF_ParamDef the bindings pass for the duration of the call.
+        let d = unsafe { &*def };
+        let name = unsafe { std::ffi::CStr::from_ptr(d.name_do_not_use_directly.as_ptr()) }.to_string_lossy().into_owned();
+        ADDED.with(|a| a.borrow_mut().push((d.param_type, unsafe { d.uu.id }, d.flags as i32, name)));
+        0
+    }
+
+    /// Runs the real `params_setup` against a host that only records PF_ADD_PARAM.
+    fn run_params_setup() -> (Vec<(sys::PF_ParamType, i32, i32, String)>, ae::Parameters<'static, FbParam>) {
+        ADDED.with(|a| a.borrow_mut().clear());
+        let mut d: Box<sys::PF_InData> = Box::new(unsafe { std::mem::zeroed() });
+        d.inter.add_param = Some(fake_add_param);
+        let mut out: Box<sys::PF_OutData> = Box::new(unsafe { std::mem::zeroed() });
+        let d: &'static sys::PF_InData = Box::leak(d);
+        let mut params = ae::Parameters::<FbParam>::new();
+        params.set_in_data(d);
+        Plugin::default()
+            .params_setup(&mut params, ae::InData::from_raw(d), ae::OutData::from_raw(&mut *out))
+            .unwrap();
+        (ADDED.with(|a| a.borrow().clone()), params)
+    }
+
+    #[test]
+    fn parameter_order_disk_ids_and_flags_are_frozen() {
+        let (added, params) = run_params_setup();
+        let types: Vec<_> = added.iter().map(|a| a.0).collect();
+        assert_eq!(types, [
+            sys::PF_Param_FLOAT_SLIDER, sys::PF_Param_FLOAT_SLIDER, sys::PF_Param_FLOAT_SLIDER,
+            sys::PF_Param_POPUP, sys::PF_Param_CHECKBOX, sys::PF_Param_POPUP, sys::PF_Param_CHECKBOX,
+            sys::PF_Param_BUTTON,
+        ]);
+        let ids: Vec<_> = added.iter().map(|a| a.1).collect();
+        assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7, 8]);
+        let names: Vec<_> = added.iter().take(7).map(|a| a.3.as_str()).collect();
+        assert_eq!(names, ["Blur Amount", "Motion Sensitivity", "Max Blur (%)", "Quality", "Blend in Linear Light", "View", "Use Source Frame Rate"]);
+        // The seven existing parameters keep the flags they always had (none).
+        assert!(added.iter().take(7).all(|a| a.2 == 0), "{added:?}");
+        assert_eq!(added[7].2, (sys::PF_ParamFlag_SUPERVISE | sys::PF_ParamFlag_CANNOT_TIME_VARY) as i32);
+        assert!(added[7].3 == format!("FlowBlur {VERSION}") || added[7].3 == "Update available", "{}", added[7].3);
+
+        // PF indices (input layer = 0) of each parameter, as the click handler sees them.
+        let order = [
+            FbParam::BlurAmount, FbParam::MotionSensitivity, FbParam::MaxBlur, FbParam::Quality,
+            FbParam::LinearLight, FbParam::View, FbParam::UseSourceRate, FbParam::UpdateNotice,
+        ];
+        for (i, p) in order.iter().enumerate() {
+            assert_eq!(params.index(*p), Some(i + 1), "{p:?}");
+            assert_eq!(p.disk_id(), i as i32 + 1, "{p:?}");
+        }
+        assert_eq!(params.num_params(), 9);
+    }
+
+    /// The GPU filter reads the first seven parameters by index (PF index - 1); the update
+    /// notice comes after all of them.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gpu_param_indices_match_the_parameter_order() {
+        use crate::gpu_filter::*;
+        let (_, params) = run_params_setup();
+        let gpu = |p| params.index(p).unwrap() as i32 - 1;
+        assert_eq!(gpu(FbParam::BlurAmount), GPU_PARAM_BLUR_AMOUNT);
+        assert_eq!(gpu(FbParam::MotionSensitivity), GPU_PARAM_MOTION_SENSITIVITY);
+        assert_eq!(gpu(FbParam::MaxBlur), GPU_PARAM_MAX_BLUR);
+        assert_eq!(gpu(FbParam::Quality), GPU_PARAM_QUALITY);
+        assert_eq!(gpu(FbParam::LinearLight), GPU_PARAM_LINEAR_LIGHT);
+        assert_eq!(gpu(FbParam::View), GPU_PARAM_VIEW);
+        assert_eq!(gpu(FbParam::UseSourceRate), GPU_PARAM_USE_SOURCE_RATE);
+        assert_eq!(gpu(FbParam::UpdateNotice), 7);
+        assert_eq!((GPU_PARAM_BLUR_AMOUNT, GPU_PARAM_USE_SOURCE_RATE), (0, 6));
+    }
+
+    #[test]
+    fn notice_and_about_texts() {
+        assert_eq!(notice_labels(None), (format!("FlowBlur {VERSION}"), "Release Notes".to_string()));
+        assert_eq!(notice_labels(Some("0.7.0")), ("Update available".to_string(), "Get 0.7.0".to_string()));
+        // The longest version the update check accepts still fits the 31-byte name limit.
+        let (name, label) = notice_labels(Some("999999.999999.999999"));
+        assert!(name.len() <= 31 && label.len() <= 31, "{label}");
+        assert_eq!(about_text(None), format!("FlowBlur {VERSION}\rOptical-flow motion blur."));
+        assert_eq!(
+            about_text(Some("0.7.0")),
+            format!("FlowBlur {VERSION}\rOptical-flow motion blur.\rVersion 0.7.0 is available: github.com/treydoe1/flowblur/releases")
+        );
+    }
 
     #[test]
     fn skips_held_frames_and_balances_checkouts() {

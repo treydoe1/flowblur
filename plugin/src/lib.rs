@@ -7,6 +7,7 @@
 //! * `diag`      – opt-in diagnostics log (/tmp/flowblur-debug -> /tmp/flowblur-debug.log)
 //! * `metal_io`  – macOS Metal buffer synchronization, readback and writeback (Premiere GPU path)
 //! * `gpu_filter` – hand-written panic-safe Premiere GPU filter (`xGPUFilterEntry`, adjustment layers)
+//! * `update_check` – once-a-day check for a newer release on GitHub (notice only, never installs)
 /// The effect's version, from `version` in Cargo.toml (the only place it is written). Shown in
 /// the About box and in every diagnostics line as `version=<x.y.z>`. build.rs encodes the same
 /// Cargo version into the PiPL `AE_Effect_Version`, which `define_effect!` reports to the host.
@@ -22,3 +23,5 @@ mod effect;
 pub mod metal_io;
 #[cfg(target_os = "macos")]
 pub mod gpu_filter;
+#[cfg(target_os = "macos")]
+mod update_check;

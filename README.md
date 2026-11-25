@@ -4,7 +4,7 @@ FlowBlur is an open-source motion blur effect for Adobe Premiere Pro. It estimat
 in each frame with dense optical flow and blurs every pixel along its own motion, so moving
 objects get streaks that follow how they actually move.
 
-This is an alpha release (version 0.5.1). Expect rough edges, and keep backups of projects you
+This is an alpha release (version 0.6.0). Expect rough edges, and keep backups of projects you
 use it in.
 
 ## Requirements
@@ -25,7 +25,7 @@ use it in.
 
    1. Click Done (or OK) in that message.
    2. Open System Settings, then Privacy & Security.
-   3. Scroll down to the Security section. There is a line saying that "FlowBlur-0.5.1.pkg" was
+   3. Scroll down to the Security section. There is a line saying that "FlowBlur-0.6.0.pkg" was
       blocked. Click Open Anyway and confirm with your password or Touch ID.
    4. The installer starts. Follow its steps.
 
@@ -45,7 +45,9 @@ your normal user:
 
 It asks for your password (through `sudo`), removes
 `/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin`, and removes
-the installer receipt. It refuses to delete that path if the bundle there is not FlowBlur.
+the installer receipt. It refuses to delete that path if the bundle there is not FlowBlur. It
+leaves the update-check folder `~/Library/Application Support/FlowBlur` in place and prints how
+to remove it.
 
 ## Build from source
 
@@ -140,6 +142,11 @@ would be compared with frames several source frames apart. Off, or when the
 clip does not qualify (including adjustment layers, nested sequences and footage at or below the
 sequence rate), the neighbouring frames are taken one sequence frame apart.
 
+**Update notice** (a button, always last): the row is named `FlowBlur <version>` and the button
+Release Notes, or, when the update check has found a newer release, the row is named "Update
+available" and the button is named after that version. Clicking it opens the release page
+in your browser and does nothing else. It does not affect rendering and cannot be keyframed.
+
 ## How it works
 
 For each frame, FlowBlur converts the current frame and its neighbouring frames (the previous
@@ -153,15 +160,47 @@ the layers below, and they are fetched through Premiere Pro's GPU filter interfa
 are processed by the same engine as on the CPU path. Everywhere else, FlowBlur uses the standard
 CPU effect path.
 
+## Update check
+
+When Premiere Pro or After Effects loads the plug-in, FlowBlur checks at most once every 24
+hours whether a newer release exists:
+
+- It makes one HTTPS request to github.com, asking for
+  `https://github.com/treydoe1/flowblur/releases/latest`, and reads only the address GitHub
+  redirects to, which names the latest release's version. The request runs in the system
+  `curl` program in the background, so loading the plug-in does not wait for it.
+- GitHub can see your IP address and the client name `FlowBlur/<version>`. Nothing about your
+  projects, footage or computer is sent.
+- Nothing is downloaded or installed. When the release is newer than the installed version,
+  the About text and the last parameter row say so; installing it is up to you.
+- The time of the last check and the latest version seen are kept in
+  `~/Library/Application Support/FlowBlur/update-check`. A notice appears the next time the
+  plug-in is loaded after a check found a newer release.
+
+To turn the check off (no request and no notice):
+
+```sh
+mkdir -p ~/Library/Application\ Support/FlowBlur && touch ~/Library/Application\ Support/FlowBlur/no-update-check
+```
+
+To turn it on again:
+
+```sh
+rm ~/Library/Application\ Support/FlowBlur/no-update-check
+```
+
 ## Switches
 
-Two files act as switches. Create them with `touch` and delete them to switch back. Both take
-effect on the next rendered frame, without restarting Premiere Pro.
+Three files act as switches. Create them with `touch` and delete them to switch back. The two in
+`/tmp` take effect on the next rendered frame, without restarting Premiere Pro; `/tmp` is
+emptied when the Mac restarts.
 
 - `/tmp/flowblur-no-gpu`: turns the GPU path off, so adjustment layers also use the CPU path.
 - `/tmp/flowblur-debug`: writes one line per rendered frame to `/tmp/flowblur-debug.log`. The
   file must be a regular file owned by you and not writable by other users, which is what
   `touch /tmp/flowblur-debug` creates.
+- `~/Library/Application Support/FlowBlur/no-update-check`: turns the update check off (see
+  Update check). It is read each time the plug-in is loaded and stays across restarts.
 
 ## Known limitations
 

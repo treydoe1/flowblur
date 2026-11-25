@@ -72,7 +72,7 @@ static LOCK: Mutex<()> = Mutex::new(());
 const MAX_LOG_TOKEN_BYTES: usize = 64;
 
 #[cfg(unix)]
-fn current_euid() -> u32 {
+pub(crate) fn current_euid() -> u32 {
     unsafe extern "C" {
         fn geteuid() -> u32;
     }
@@ -140,11 +140,18 @@ pub fn gpu_disabled() -> bool {
     gpu_disabled_from(std::path::Path::new(NO_GPU_FLAG_PATH))
 }
 
-/// Safely reads a small debug flag file: requires a regular file (never follows symlinks, never
-/// blocks on a FIFO/named pipe, rejects directories/devices/sockets), owned by the current user
-/// and not group- or world-writable, and reads at most `MAX_FLAG_FILE_BYTES` (16) bytes.
+/// Safely reads a small debug flag file: see `read_regular_file_capped`, with a cap of
+/// `MAX_FLAG_FILE_BYTES` (16) bytes and UTF-8 content.
 #[cfg(target_os = "macos")]
 fn read_regular_flag_file(path: &std::path::Path) -> Option<String> {
+    String::from_utf8(read_regular_file_capped(path, MAX_FLAG_FILE_BYTES)?).ok()
+}
+
+/// Safely reads a small file: requires a regular file (never follows symlinks, never blocks on a
+/// FIFO/named pipe, rejects directories/devices/sockets), owned by the current user and not
+/// group- or world-writable, no larger than `max_bytes`, and reads at most `max_bytes` bytes.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_regular_file_capped(path: &std::path::Path, max_bytes: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -156,7 +163,7 @@ fn read_regular_flag_file(path: &std::path::Path) -> Option<String> {
 
     // 1. Pre-check with `lstat` before `open` so symlinks/FIFOs/untrusted files are rejected immediately.
     let lmeta = std::fs::symlink_metadata(path).ok()?;
-    if !is_trusted_regular_meta(&lmeta, uid) || lmeta.len() > MAX_FLAG_FILE_BYTES as u64 {
+    if !is_trusted_regular_meta(&lmeta, uid) || lmeta.len() > max_bytes as u64 {
         return None;
     }
 
@@ -167,16 +174,14 @@ fn read_regular_flag_file(path: &std::path::Path) -> Option<String> {
         .open(path)
         .ok()?;
     let fmeta = file.metadata().ok()?;
-    if !is_trusted_regular_meta(&fmeta, uid) || fmeta.len() > MAX_FLAG_FILE_BYTES as u64 {
+    if !is_trusted_regular_meta(&fmeta, uid) || fmeta.len() > max_bytes as u64 {
         return None;
     }
 
-    // 3. Bounded read of at most `MAX_FLAG_FILE_BYTES` (16) bytes.
-    let mut buf = Vec::with_capacity(MAX_FLAG_FILE_BYTES);
-    file.take(MAX_FLAG_FILE_BYTES as u64)
-        .read_to_end(&mut buf)
-        .ok()?;
-    String::from_utf8(buf).ok()
+    // 3. Bounded read of at most `max_bytes` bytes.
+    let mut buf = Vec::with_capacity(max_bytes);
+    file.take(max_bytes as u64).read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 /// Resolves the GPU dependency step count from `steps_path` when `debug_enabled` is true.

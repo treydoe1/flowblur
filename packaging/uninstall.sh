@@ -32,3 +32,7 @@ else
     echo "No installer receipt for $PKG_ID."
 fi
 echo "FlowBlur uninstalled. Restart Premiere Pro / After Effects if they were running."
+# The update check keeps a small state folder in each user's home directory. It is not removed
+# here: this script may be run under sudo, where the home directory is not reliably the user's.
+echo "The update-check folder ~/Library/Application Support/FlowBlur, if present, is left in place."
+echo "To remove it, run as yourself:  rm -r ~/Library/Application\\ Support/FlowBlur"
