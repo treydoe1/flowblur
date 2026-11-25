@@ -20,7 +20,7 @@ use it in.
 2. Quit Premiere Pro and After Effects. They load plug-ins only when they start.
 3. Double-click the package.
 
-   The package is not signed with an Apple Developer ID, so macOS will refuse to open it the
+   The package is not signed with an Apple Developer ID YET (coming in a few days), so macOS will refuse to open it the
    first time and say it cannot verify the developer. To open it anyway:
 
    1. Click Done (or OK) in that message.
