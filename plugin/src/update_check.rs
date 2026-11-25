@@ -19,11 +19,11 @@
 //!   child process, no request, no notice.
 //! * Every failure is silent; with the diagnostics log enabled, one line per attempt is logged.
 
-use std::ffi::{CString, c_char, c_int, c_short};
+use std::ffi::{CString, c_char, c_int, c_short, c_uint};
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Mutex, Once, OnceLock, PoisonError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -231,6 +231,9 @@ struct Ctx {
     dir: Option<PathBuf>,
     now: Box<dyn Fn() -> u64 + Send>,
     fetch: Box<dyn Fn() -> Option<Version> + Send>,
+    /// Receives a version the check found (and stored), so host threads see it without
+    /// reading the state file again.
+    publish: Box<dyn Fn(Version) + Send>,
     log: Box<dyn Fn(&str) + Send>,
 }
 
@@ -301,6 +304,32 @@ fn available_update_in(dir: Option<&Path>, running: Option<Version>) -> Option<V
     (latest > running?).then_some(latest)
 }
 
+/// The update notice as host threads see it, kept per process: filled from the state file by
+/// the first caller, then read without touching the file system, and replaced by the check
+/// thread when it finds a version.
+struct NoticeCache(Mutex<Option<Option<Version>>>);
+
+impl NoticeCache {
+    const fn new() -> Self {
+        NoticeCache(Mutex::new(None))
+    }
+
+    /// The cached notice; the first call fills it with `fill`.
+    fn get(&self, fill: impl FnOnce() -> Option<Version>) -> Option<Version> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(fill)
+    }
+
+    /// Replaces the notice with what the state file now says: `latest` when it is strictly
+    /// newer than `running`, otherwise none. The check only gets this far with the off switch
+    /// clear.
+    fn publish(&self, latest: Version, running: Option<Version>) {
+        let notice = running.filter(|r| latest > *r).map(|_| latest);
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(notice);
+    }
+}
+
+static NOTICE: NoticeCache = NoticeCache::new();
+
 /// Runs `check_once` on a named background thread, at most once per `once`.
 fn start_with(once: &Once, make_ctx: impl FnOnce() -> Ctx + Send + 'static) -> Option<std::thread::JoinHandle<()>> {
     let mut handle = None;
@@ -311,6 +340,9 @@ fn start_with(once: &Once, make_ctx: impl FnOnce() -> Ctx + Send + 'static) -> O
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     let ctx = make_ctx();
                     let outcome = check_once(&ctx);
+                    if let Outcome::Fetched(Some(latest)) = outcome {
+                        (ctx.publish)(latest);
+                    }
                     (ctx.log)(&outcome.log_line());
                 }));
             })
@@ -336,8 +368,10 @@ fn home_dir() -> Option<PathBuf> {
     (meta.is_dir() && meta.uid() == diag::current_euid()).then_some(home)
 }
 
+/// The state directory, resolved once per process by whichever thread asks first.
 fn state_dir() -> Option<PathBuf> {
-    Some(home_dir()?.join("Library").join("Application Support").join("FlowBlur"))
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| Some(home_dir()?.join("Library").join("Application Support").join("FlowBlur"))).clone()
 }
 
 fn unix_now() -> u64 {
@@ -392,6 +426,7 @@ fn real_ctx() -> Ctx {
             let dir = dir.clone();
             Box::new(move || fetch_latest(dir.as_deref()?))
         },
+        publish: Box::new(|latest| NOTICE.publish(latest, running_version())),
         log: Box::new(|line| {
             if diag::enabled() {
                 diag::append(line);
@@ -413,9 +448,11 @@ pub fn start_background_check() {
     });
 }
 
-/// The newer release found by an earlier check, if any. Reads only the small state file.
+/// The newer release found by a check, if any. The first call in a process reads the small
+/// state file (and the off switch); later calls only read the per-process cache, which the
+/// check thread updates.
 pub fn available_update() -> Option<Version> {
-    catch_unwind(|| available_update_in(state_dir().as_deref(), running_version())).ok().flatten()
+    catch_unwind(|| NOTICE.get(|| available_update_in(state_dir().as_deref(), running_version()))).ok().flatten()
 }
 
 /// Records an open at `now_ms` (monotonic milliseconds) and returns true, unless the last
@@ -521,13 +558,26 @@ impl ChildControl for RealChildControl {
         waitpid_once(pid, block)
     }
     fn kill(&mut self, pid: libc::pid_t) {
+        if !is_child_pid(pid) {
+            return;
+        }
         // SAFETY: `kill(2)` takes plain integers and touches no memory of ours.
         let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 }
 
-/// `waitpid(pid, &status, block ? 0 : WNOHANG)`, retried on EINTR.
+/// True for a pid that names one process. 0 and negative values would address a process group
+/// (or every process the host may signal) in `kill` and any child in `waitpid`.
+fn is_child_pid(pid: libc::pid_t) -> bool {
+    pid > 0
+}
+
+/// `waitpid(pid, &status, block ? 0 : WNOHANG)`, retried on EINTR. A pid of 0 or less is
+/// never passed on; it is reported as EINVAL, which counts as a failed wait (not ECHILD).
 fn waitpid_once(pid: libc::pid_t, block: bool) -> Waited {
+    if !is_child_pid(pid) {
+        return Waited::Error(libc::EINVAL);
+    }
     let options = if block { 0 } else { libc::WNOHANG };
     loop {
         let mut status: c_int = 0;
@@ -551,12 +601,49 @@ fn exit_code(status: c_int) -> Option<i32> {
     libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
 }
 
+// Mach task exception ports. A child otherwise inherits the host's (such as its crash
+// reporter's), which would then be told about a crash of `curl` or `open`. The child's ports
+// are set to the null port for every exception type, so its exceptions go to the system's
+// default handling instead. Values from the SDK's <mach/exception_types.h>,
+// <mach/arm/thread_status.h> and <mach/port.h>; the declaration from <spawn.h>.
+const EXC_MASK_ALL: c_uint = (1 << 1) // EXC_BAD_ACCESS
+    | (1 << 2) // EXC_BAD_INSTRUCTION
+    | (1 << 3) // EXC_ARITHMETIC
+    | (1 << 4) // EXC_EMULATION
+    | (1 << 5) // EXC_SOFTWARE
+    | (1 << 6) // EXC_BREAKPOINT
+    | (1 << 7) // EXC_SYSCALL
+    | (1 << 8) // EXC_MACH_SYSCALL
+    | (1 << 9) // EXC_RPC_ALERT
+    | (1 << 11) // EXC_RESOURCE
+    | (1 << 12); // EXC_GUARD (EXC_MASK_MACHINE is 0)
+/// `EXC_MASK_ALL` leaves out the two types crash reporters usually register for.
+const CHILD_EXC_MASK: c_uint = EXC_MASK_ALL | (1 << 10) /* EXC_CRASH */ | (1 << 13) /* EXC_CORPSE_NOTIFY */;
+const MACH_PORT_NULL: libc::mach_port_t = 0;
+const EXCEPTION_DEFAULT: c_int = 1;
+#[cfg(target_arch = "aarch64")]
+const THREAD_STATE_NONE: c_int = 5;
+#[cfg(target_arch = "x86_64")]
+const THREAD_STATE_NONE: c_int = 13;
+
+unsafe extern "C" {
+    /// `int posix_spawnattr_setexceptionports_np(posix_spawnattr_t *, exception_mask_t,
+    /// mach_port_t, exception_behavior_t, thread_state_flavor_t)`; the libc crate lacks it.
+    fn posix_spawnattr_setexceptionports_np(
+        attr: *mut libc::posix_spawnattr_t,
+        mask: c_uint,
+        new_port: libc::mach_port_t,
+        behavior: c_int,
+        flavor: c_int,
+    ) -> c_int;
+}
+
 /// A `posix_spawnattr_t`, destroyed on drop.
 struct SpawnAttr(libc::posix_spawnattr_t);
 
 impl SpawnAttr {
     /// Close-on-exec for every descriptor not set up by the file actions, every signal reset to
-    /// its default action, and an empty signal mask.
+    /// its default action, an empty signal mask, and no task exception ports.
     fn new() -> Option<Self> {
         let mut raw: libc::posix_spawnattr_t = std::ptr::null_mut();
         // SAFETY: `raw` is a valid out-pointer; on success it owns an attribute object, which
@@ -574,11 +661,13 @@ impl SpawnAttr {
         }
         let flags = (libc::POSIX_SPAWN_CLOEXEC_DEFAULT | libc::POSIX_SPAWN_SETSIGDEF | libc::POSIX_SPAWN_SETSIGMASK) as c_short;
         // SAFETY: `attr.0` was initialised above; the set pointers are valid for each call and
-        // the values are copied into the attribute object.
+        // the values are copied into the attribute object. The exception-port call passes plain
+        // integers (a null port).
         let ok = unsafe {
             libc::posix_spawnattr_setflags(&mut attr.0, flags) == 0
                 && libc::posix_spawnattr_setsigdefault(&mut attr.0, &all) == 0
                 && libc::posix_spawnattr_setsigmask(&mut attr.0, &none) == 0
+                && posix_spawnattr_setexceptionports_np(&mut attr.0, CHILD_EXC_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == 0
         };
         ok.then_some(attr)
     }
@@ -655,7 +744,7 @@ fn spawn_child(spawn: &Spawn, out: Option<&Path>) -> Option<libc::pid_t> {
     // `envv`, the two pointer arrays, `actions`, `attr`, `pid`); both arrays end in NULL; and
     // `posix_spawn` does not write through `argv` or `envp` despite their `char *` type.
     let err = unsafe { libc::posix_spawn(&mut pid, program.as_ptr(), &actions.0, &attr.0, argv_ptrs.as_ptr(), envp_ptrs.as_ptr()) };
-    (err == 0).then_some(pid)
+    (err == 0 && is_child_pid(pid)).then_some(pid)
 }
 
 /// Runs `spawn` with `limit` as a hard wall-clock limit. With `out_dir`, the child's standard
@@ -692,6 +781,10 @@ fn run_with_output(spawn: &Spawn, out: Option<&Path>, limit: Duration, cap: usiz
             }
             // After a wait error the pid may already be free and reused, so no signal is sent.
             Waited::Error(libc::ECHILD) => break RunEnd::ReapedElsewhere,
+            // With a valid pid of our own child, a non-blocking `waitpid` fails only with ECHILD
+            // (EINTR is retried), so this is essentially unreachable. If it happens, the child is
+            // left alone: it is not signalled (see above) and `curl` ends by its own
+            // `--max-time`; at worst it stays unreaped until the host exits.
             Waited::Error(_) => break RunEnd::WaitFailed,
         }
     };
@@ -759,6 +852,7 @@ mod tests {
                 *s.lock().unwrap() = Some(d.as_deref().and_then(read_state));
                 result
             }),
+            publish: Box::new(|_| {}),
             log: Box::new(|_| {}),
         };
         (ctx, Probe { fetches, seen_at_fetch: seen })
@@ -1185,6 +1279,72 @@ mod tests {
     }
 
     #[test]
+    fn notice_cache_reads_the_file_once_and_takes_published_versions() {
+        let cache = NoticeCache::new();
+        let fills = AtomicUsize::new(0);
+        let fill = || {
+            fills.fetch_add(1, Ordering::SeqCst);
+            Some(v(0, 7, 0))
+        };
+        assert_eq!(cache.get(fill), Some(v(0, 7, 0)));
+        assert_eq!(cache.get(|| panic!("filled once")), Some(v(0, 7, 0)));
+        assert_eq!(fills.load(Ordering::SeqCst), 1);
+
+        let running = Some(v(0, 6, 0));
+        cache.publish(v(0, 8, 0), running);
+        assert_eq!(cache.get(|| panic!("filled once")), Some(v(0, 8, 0)));
+        // A version that is not newer clears the notice, as the state file now says.
+        cache.publish(v(0, 6, 0), running);
+        assert_eq!(cache.get(|| panic!("filled once")), None);
+        cache.publish(v(0, 5, 0), running);
+        assert_eq!(cache.get(|| panic!("filled once")), None);
+        cache.publish(v(1, 0, 0), None);
+        assert_eq!(cache.get(|| panic!("filled once")), None);
+
+        // A publish before anyone asked also fills the cache.
+        let cache = NoticeCache::new();
+        cache.publish(v(0, 9, 0), running);
+        assert_eq!(cache.get(|| panic!("already filled")), Some(v(0, 9, 0)));
+        // A cache filled with "no notice" stays empty without reading again.
+        let cache = NoticeCache::new();
+        assert_eq!(cache.get(|| None), None);
+        assert_eq!(cache.get(|| panic!("filled once")), None);
+    }
+
+    #[test]
+    fn the_check_thread_publishes_what_it_found() {
+        let t = TempDir::new();
+        let cache = Arc::new(NoticeCache::new());
+        let running = Some(v(0, 6, 0));
+        // The cache was filled with "no notice" when the host first asked.
+        assert_eq!(cache.get(|| None), None);
+        let (mut ctx, probe) = ctx_with(Some(t.state()), NOW, Some(v(0, 7, 0)));
+        let c = cache.clone();
+        ctx.publish = Box::new(move |latest| c.publish(latest, running));
+        let once = Once::new();
+        start_with(&once, move || ctx).unwrap().join().unwrap();
+        assert_eq!(probe.fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(cache.get(|| panic!("filled once")), Some(v(0, 7, 0)));
+        assert_eq!(read_state(&t.state()).unwrap().latest, Some(v(0, 7, 0)));
+
+        // No information publishes nothing.
+        let t = TempDir::new();
+        let cache = Arc::new(NoticeCache::new());
+        let (mut ctx, _) = ctx_with(Some(t.state()), NOW, None);
+        let c = cache.clone();
+        ctx.publish = Box::new(move |latest| c.publish(latest, running));
+        start_with(&Once::new(), move || ctx).unwrap().join().unwrap();
+        assert_eq!(cache.get(|| Some(v(9, 9, 9))), Some(v(9, 9, 9)), "still unfilled");
+    }
+
+    #[test]
+    fn state_directory_is_resolved_once_and_never_in_tests() {
+        assert_eq!(state_dir(), None);
+        assert_eq!(state_dir(), None);
+        assert_eq!(available_update(), None);
+    }
+
+    #[test]
     fn two_starts_cause_one_fetch() {
         let t = TempDir::new();
         let once = Once::new();
@@ -1514,6 +1674,40 @@ mod tests {
         let mut c = Counting(0);
         let r = run_spawned(&sp("/usr/bin/true", &[], &[]), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut c);
         assert_eq!((r.end, c.0), (RunEnd::Exited(Some(0)), 0));
+    }
+
+    #[test]
+    fn pids_of_zero_or_less_never_reach_waitpid_or_kill() {
+        for pid in [0, -1, -2, libc::pid_t::MIN] {
+            assert!(!is_child_pid(pid));
+            // 0 or -1 would otherwise reap (or, blocking, wait for) any child of this process.
+            assert_eq!(waitpid_once(pid, false), Waited::Error(libc::EINVAL));
+            assert_eq!(waitpid_once(pid, true), Waited::Error(libc::EINVAL));
+        }
+        assert!(is_child_pid(1));
+        // EINVAL is a failed wait, not "reaped elsewhere", so its output would never be used.
+        struct BadPid;
+        impl ChildControl for BadPid {
+            fn wait(&mut self, _: libc::pid_t, block: bool) -> Waited {
+                waitpid_once(0, block)
+            }
+            fn kill(&mut self, _: libc::pid_t) {
+                panic!("no signal after a wait error");
+            }
+        }
+        let t = TempDir::new();
+        let r = run_spawned(&sp("/bin/echo", &["x"], &[]), Some(&t.0), Duration::from_secs(10), MAX_OUTPUT_BYTES, &mut BadPid);
+        assert_eq!((r.end, r.output), (RunEnd::WaitFailed, None));
+        // The real child is still ours to reap.
+        assert!(matches!(waitpid_once(r.pid.unwrap(), true), Waited::Ended(_)));
+    }
+
+    #[test]
+    fn spawn_attributes_include_cleared_exception_ports() {
+        // Every exception type from EXC_BAD_ACCESS (1) to EXC_CORPSE_NOTIFY (13).
+        assert_eq!(CHILD_EXC_MASK, 0x3ffe);
+        assert_eq!(CHILD_EXC_MASK & (1 << 10), 1 << 10, "EXC_CRASH");
+        assert!(SpawnAttr::new().is_some(), "the host accepts the whole attribute set");
     }
 
     #[test]

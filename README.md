@@ -171,8 +171,9 @@ checking.
   `https://github.com/treydoe1/flowblur/releases/latest`, and reads only the address GitHub
   redirects to, which names the latest release's version. The request runs in the system
   `curl` program in the background, so loading the plug-in does not wait for it.
-  A network monitor therefore shows the request as coming from `curl`. Proxy settings are not
-  used, so behind a proxy the check finds nothing.
+  A network monitor therefore shows the request as coming from `curl`. The request is made
+  directly, so it does not go through a configured proxy; where direct connections are
+  blocked, the check finds nothing.
 - GitHub can see your IP address and the client name `FlowBlur/<version>`. Nothing about your
   projects, footage or computer is sent.
 - Nothing is downloaded or installed. When the release is newer than the installed version,

@@ -137,7 +137,12 @@ impl AdobePluginGlobal for Plugin {
         // Always last, so it cannot shift the indices the GPU filter reads. The labels are
         // chosen once here from the stored result of an earlier check.
         let (name, label) = notice_labels(available_update_text().as_deref());
-        params.add_customized(FbParam::UpdateNotice, &name, ae::ButtonDef::setup(|b| {
+        // A host that refuses the button still gets a working effect. The bindings register a
+        // parameter in their map and count it in `num_params` only after the host accepted it,
+        // so a refused button leaves the seven real parameters and the reported count intact,
+        // and `params.index(FbParam::UpdateNotice)` stays `None`, which keeps the click
+        // handler inert.
+        let _ = params.add_customized(FbParam::UpdateNotice, &name, ae::ButtonDef::setup(|b| {
             b.set_label(&label);
         }), |pd| {
             pd.set_id(FbParam::UpdateNotice.disk_id());
@@ -145,7 +150,7 @@ impl AdobePluginGlobal for Plugin {
             // and CANNOT_TIME_VARY keeps any keyframe control off its row.
             pd.set_flags(ae::ParamFlag::SUPERVISE | ae::ParamFlag::CANNOT_TIME_VARY);
             -1
-        })?;
+        });
         Ok(())
     }
 
@@ -1831,14 +1836,19 @@ mod tests {
     // ── legacy / After Effects ──
 
     thread_local! {
-        /// (param_type, disk id, flags, name) of each PF_ADD_PARAM call, in order.
+        /// (param_type, disk id, flags, name) of each PF_ADD_PARAM call the fake host accepted.
         static ADDED: RefCell<Vec<(sys::PF_ParamType, i32, i32, String)>> = const { RefCell::new(Vec::new()) };
+        /// When set, the fake host refuses button parameters.
+        static REJECT_BUTTON: Cell<bool> = const { Cell::new(false) };
     }
 
     unsafe extern "C" fn fake_add_param(_: sys::PF_ProgPtr, index: sys::PF_ParamIndex, def: sys::PF_ParamDefPtr) -> sys::PF_Err {
         assert_eq!(index, -1);
         // SAFETY: `def` points at the PF_ParamDef the bindings pass for the duration of the call.
         let d = unsafe { &*def };
+        if d.param_type == sys::PF_Param_BUTTON && REJECT_BUTTON.with(Cell::get) {
+            return sys::PF_Err_INTERNAL_STRUCT_DAMAGED as sys::PF_Err;
+        }
         let name = unsafe { std::ffi::CStr::from_ptr(d.name_do_not_use_directly.as_ptr()) }.to_string_lossy().into_owned();
         ADDED.with(|a| a.borrow_mut().push((d.param_type, unsafe { d.uu.id }, d.flags as i32, name)));
         0
@@ -1907,6 +1917,29 @@ mod tests {
         assert_eq!(gpu(FbParam::UseSourceRate), GPU_PARAM_USE_SOURCE_RATE);
         assert_eq!(gpu(FbParam::UpdateNotice), 7);
         assert_eq!((GPU_PARAM_BLUR_AMOUNT, GPU_PARAM_USE_SOURCE_RATE), (0, 6));
+    }
+
+    #[test]
+    fn a_refused_button_leaves_a_consistent_effect() {
+        REJECT_BUTTON.with(|r| r.set(true));
+        let (added, params) = run_params_setup();
+        REJECT_BUTTON.with(|r| r.set(false));
+        // The host accepted the seven real parameters, and the count reported to it (input
+        // layer included) matches.
+        let ids: Vec<_> = added.iter().map(|a| a.1).collect();
+        assert_eq!(ids, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(params.num_params(), 8);
+        let order = [
+            FbParam::BlurAmount, FbParam::MotionSensitivity, FbParam::MaxBlur, FbParam::Quality,
+            FbParam::LinearLight, FbParam::View, FbParam::UseSourceRate,
+        ];
+        for (i, p) in order.iter().enumerate() {
+            assert_eq!(params.index(*p), Some(i + 1), "{p:?}");
+        }
+        // No index for the button, so no parameter change opens the page.
+        let button = params.index(FbParam::UpdateNotice);
+        assert_eq!(button, None);
+        assert!((0..=20).all(|i| !is_update_button(button, i)));
     }
 
     #[test]
