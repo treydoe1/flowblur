@@ -18,16 +18,8 @@ use it in.
 1. Open the release page, <https://github.com/treydoe1/flowblur/releases>, and download the
    `FlowBlur-<version>.pkg` attached to the latest release.
 2. Quit Premiere Pro and After Effects. They load plug-ins only when they start.
-3. Double-click the package.
-
-   The package is not signed with an Apple Developer ID until it is tested on a few machines, so macOS will refuse to open it the
-   first time and say it cannot verify the developer. To open it anyway:
-
-   1. Click Done (or OK) in that message.
-   2. Open System Settings, then Privacy & Security.
-   3. Scroll down to the Security section. There is a line saying that "FlowBlur-0.6.0.pkg" was
-      blocked. Click Open Anyway and confirm with your password or Touch ID.
-   4. The installer starts. Follow its steps.
+3. Double-click the package and follow the installer's steps. The package is signed with an
+   Apple Developer ID and notarized by Apple, so macOS opens it without a warning.
 
 4. The installer copies `FlowBlur.plugin` to
    `/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/`, replacing any earlier
