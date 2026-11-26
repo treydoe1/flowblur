@@ -7,7 +7,7 @@
 
 use after_effects as ae;
 use ae::sys;
-use flowblur_core as core;
+use tblur_core as core;
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -260,9 +260,9 @@ fn is_update_button(button_index: Option<usize>, changed_index: usize) -> bool {
 
 /// The About box text, with a line naming a newer release when one is known.
 fn about_text(update: Option<&str>) -> String {
-    let mut s = format!("FlowBlur {VERSION}\rOptical-flow motion blur.");
+    let mut s = format!("T Blur {VERSION}\rOptical-flow motion blur.");
     if let Some(v) = update {
-        s += &format!("\rVersion {v} is available: github.com/treydoe1/flowblur/releases");
+        s += &format!("\rVersion {v} is available: github.com/treydoe1/tblur/releases");
     }
     s
 }
@@ -272,7 +272,7 @@ fn about_text(update: Option<&str>) -> String {
 fn notice_labels(update: Option<&str>) -> (String, String) {
     match update {
         Some(v) => ("Update available".to_string(), format!("Get {v}")),
-        None => (format!("FlowBlur {VERSION}"), "Release Notes".to_string()),
+        None => (format!("T Blur {VERSION}"), "Release Notes".to_string()),
     }
 }
 
@@ -457,7 +457,7 @@ fn format_plugin_id(id: &PrPluginID) -> String {
     }
 }
 
-/// Opt-in Premiere Video Segment suite probe behind `/tmp/flowblur-debug-seghash`.
+/// Opt-in Premiere Video Segment suite probe behind `/tmp/tblur-debug-seghash`.
 /// Acquires the suite through PICA, queries segment hash and node hash at `util_sequence_time`,
 /// and releases every handle and the suite on every exit path. Never panics.
 fn probe_video_segment_hash(in_data: &ae::InData, host: Option<HostTiming>) -> SegHashDiag {
@@ -622,7 +622,7 @@ struct SourceReq {
 }
 
 /// Records `(instance_id, synthetic)` into the shared process-wide registry and logs when first
-/// recorded (or if `synthetic` ever flips) while `/tmp/flowblur-debug` is active.
+/// recorded (or if `synthetic` ever flips) while `/tmp/tblur-debug` is active.
 fn record_instance_synthetic_pair(instance_id: i32, synthetic: bool, cmd_name: &'static str) {
     let outcome = instance_registry::global().record(instance_id, synthetic, cmd_name);
     if (outcome.is_first || outcome.changed) && diag::enabled() {
@@ -796,7 +796,7 @@ struct Diag {
     co_in_flight_max: usize,
     computing: Option<usize>,
     budget: Option<usize>,
-    /// Populated only when `/tmp/flowblur-debug-seghash` also exists.
+    /// Populated only when `/tmp/tblur-debug-seghash` also exists.
     seg: Option<SegHashDiag>,
 }
 
@@ -1886,7 +1886,7 @@ mod tests {
         assert!(added.iter().take(7).all(|a| a.2 == 0), "{added:?}");
         assert_eq!(added[7].2, (sys::PF_ParamFlag_SUPERVISE | sys::PF_ParamFlag_CANNOT_TIME_VARY) as i32);
         // Tests never resolve the home directory, so no stored result is read.
-        assert_eq!(added[7].3, format!("FlowBlur {VERSION}"));
+        assert_eq!(added[7].3, format!("T Blur {VERSION}"));
 
         // PF indices (input layer = 0) of each parameter, as the click handler sees them.
         let order = [
@@ -1955,15 +1955,15 @@ mod tests {
 
     #[test]
     fn notice_and_about_texts() {
-        assert_eq!(notice_labels(None), (format!("FlowBlur {VERSION}"), "Release Notes".to_string()));
+        assert_eq!(notice_labels(None), (format!("T Blur {VERSION}"), "Release Notes".to_string()));
         assert_eq!(notice_labels(Some("0.7.0")), ("Update available".to_string(), "Get 0.7.0".to_string()));
         // The longest version the update check accepts still fits the 31-byte name limit.
         let (name, label) = notice_labels(Some("999999.999999.999999"));
         assert!(name.len() <= 31 && label.len() <= 31, "{label}");
-        assert_eq!(about_text(None), format!("FlowBlur {VERSION}\rOptical-flow motion blur."));
+        assert_eq!(about_text(None), format!("T Blur {VERSION}\rOptical-flow motion blur."));
         assert_eq!(
             about_text(Some("0.7.0")),
-            format!("FlowBlur {VERSION}\rOptical-flow motion blur.\rVersion 0.7.0 is available: github.com/treydoe1/flowblur/releases")
+            format!("T Blur {VERSION}\rOptical-flow motion blur.\rVersion 0.7.0 is available: github.com/treydoe1/tblur/releases")
         );
     }
 

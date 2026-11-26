@@ -11,11 +11,11 @@
 //! * The reply is accepted only if it is exactly the expected tag URL with a
 //!   `MAJOR.MINOR.PATCH` version; anything else means "no information". Only the parsed numbers
 //!   are stored and shown.
-//! * State lives in `~/Library/Application Support/FlowBlur/update-check` (attempt time in Unix
+//! * State lives in `~/Library/Application Support/TBlur/update-check` (attempt time in Unix
 //!   seconds and the latest version seen). The attempt time is written before `curl` starts,
 //!   which makes it unlikely (not impossible) that several host processes loading the plug-in
 //!   together all check.
-//! * The file `~/Library/Application Support/FlowBlur/no-update-check` turns all of this off: no
+//! * The file `~/Library/Application Support/TBlur/no-update-check` turns all of this off: no
 //!   child process, no request, no notice.
 //! * Every failure is silent; with the diagnostics log enabled, one line per attempt is logged.
 
@@ -31,11 +31,11 @@ use crate::VERSION;
 use crate::diag;
 
 /// The page a click on the notice opens.
-pub const RELEASES_URL: &str = "https://github.com/treydoe1/flowblur/releases";
+pub const RELEASES_URL: &str = "https://github.com/treydoe1/tblur/releases";
 /// GitHub answers this with a redirect to the latest release's tag page.
-const LATEST_URL: &str = "https://github.com/treydoe1/flowblur/releases/latest";
+const LATEST_URL: &str = "https://github.com/treydoe1/tblur/releases/latest";
 /// The only redirect target accepted, followed by the tag.
-const TAG_URL_PREFIX: &str = "https://github.com/treydoe1/flowblur/releases/tag/";
+const TAG_URL_PREFIX: &str = "https://github.com/treydoe1/tblur/releases/tag/";
 
 const CURL: &str = "/usr/bin/curl";
 const OPEN: &str = "/usr/bin/open";
@@ -45,7 +45,7 @@ const OFF_SWITCH_FILE: &str = "no-update-check";
 const CHECK_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// The largest valid state file is 57 bytes.
 const MAX_STATE_BYTES: usize = 128;
-/// The largest valid redirect URL is 71 bytes.
+/// The largest valid redirect URL is 68 bytes.
 const MAX_OUTPUT_BYTES: usize = 1024;
 /// Hard wall-clock limit for the `curl` child; its own `--max-time` is 8 s.
 const CURL_TIME_LIMIT: Duration = Duration::from_secs(12);
@@ -335,7 +335,7 @@ fn start_with(once: &Once, make_ctx: impl FnOnce() -> Ctx + Send + 'static) -> O
     let mut handle = None;
     once.call_once(|| {
         handle = std::thread::Builder::new()
-            .name("flowblur-update-check".to_string())
+            .name("tblur-update-check".to_string())
             .spawn(move || {
                 let _ = catch_unwind(AssertUnwindSafe(|| {
                     let ctx = make_ctx();
@@ -371,7 +371,7 @@ fn home_dir() -> Option<PathBuf> {
 /// The state directory, resolved once per process by whichever thread asks first.
 fn state_dir() -> Option<PathBuf> {
     static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
-    DIR.get_or_init(|| Some(home_dir()?.join("Library").join("Application Support").join("FlowBlur"))).clone()
+    DIR.get_or_init(|| Some(home_dir()?.join("Library").join("Application Support").join("TBlur"))).clone()
 }
 
 fn unix_now() -> u64 {
@@ -399,7 +399,7 @@ fn curl_spawn() -> Spawn {
         "-sS",
         "-o", "/dev/null",
         "-w", "%{redirect_url}",
-        "-A", &format!("FlowBlur/{VERSION}"),
+        "-A", &format!("TBlur/{VERSION}"),
         LATEST_URL,
     ];
     Spawn { program: CURL.to_string(), args: args.iter().map(|a| a.to_string()).collect(), env: Vec::new() }
@@ -486,7 +486,7 @@ pub fn open_releases_page() {
         if !allow_open(&LAST_OPEN, monotonic_ms()) {
             return;
         }
-        let _ = std::thread::Builder::new().name("flowblur-open-releases".to_string()).spawn(|| {
+        let _ = std::thread::Builder::new().name("tblur-open-releases".to_string()).spawn(|| {
             let _ = catch_unwind(|| {
                 run_spawned(&open_spawn(home_dir().as_deref()), None, OPEN_TIME_LIMIT, 0, &mut RealChildControl)
             });
@@ -824,7 +824,7 @@ mod tests {
         }
         /// The state directory inside it, not yet created.
         fn state(&self) -> PathBuf {
-            self.0.join("FlowBlur")
+            self.0.join("TBlur")
         }
     }
 
@@ -890,20 +890,20 @@ mod tests {
 
         let rejected: Vec<String> = [
             // other hosts, schemes and paths
-            "https://github.com/someone/flowblur/releases/tag/v1.0.0",
+            "https://github.com/someone/tblur/releases/tag/v1.0.0",
             "https://github.com/treydoe1/other/releases/tag/v1.0.0",
-            "https://gitlab.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "https://github.com.example.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "https://GitHub.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "https://github.com:443/treydoe1/flowblur/releases/tag/v1.0.0",
-            "https://user@github.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "http://github.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "HTTPS://github.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "//github.com/treydoe1/flowblur/releases/tag/v1.0.0",
-            "/treydoe1/flowblur/releases/tag/v1.0.0",
-            "https://github.com/treydoe1/flowblur/releases",
-            "https://github.com/treydoe1/flowblur/releases/latest",
-            "https://github.com/treydoe1/flowblur/releases/tag",
+            "https://gitlab.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "https://github.com.example.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "https://GitHub.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "https://github.com:443/treydoe1/tblur/releases/tag/v1.0.0",
+            "https://user@github.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "http://github.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "HTTPS://github.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "//github.com/treydoe1/tblur/releases/tag/v1.0.0",
+            "/treydoe1/tblur/releases/tag/v1.0.0",
+            "https://github.com/treydoe1/tblur/releases",
+            "https://github.com/treydoe1/tblur/releases/latest",
+            "https://github.com/treydoe1/tblur/releases/tag",
             "",
         ]
         .iter()
@@ -1091,7 +1091,7 @@ mod tests {
 
         // A missing parent is not created.
         let t = TempDir::new();
-        let dir = t.0.join("missing").join("FlowBlur");
+        let dir = t.0.join("missing").join("TBlur");
         let (ctx, probe) = ctx_with(Some(dir.clone()), NOW, None);
         assert_eq!(check_once(&ctx), Outcome::BadDir);
         assert!(!t.0.join("missing").exists());
@@ -1755,7 +1755,7 @@ mod tests {
     fn curl_and_open_command_lines() {
         let c = curl_spawn();
         assert_eq!(c.program, CURL);
-        let ua = format!("FlowBlur/{VERSION}");
+        let ua = format!("TBlur/{VERSION}");
         let want = [
             "-q", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--connect-timeout", "5",
             "--max-time", "8", "--max-redirs", "0", "-sS", "-o", "/dev/null", "-w", "%{redirect_url}",

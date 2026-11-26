@@ -1,4 +1,4 @@
-# Tests and builds FlowBlur on an Apple Silicon runner, and checks the locked dependencies
+# Tests and builds T Blur on an Apple Silicon runner, and checks the locked dependencies
 # against the RustSec advisory database. Nothing here is signed with a Developer ID or
 # notarized: releases are built locally with packaging/build_pkg.sh --notarize (see README).
 name: CI
@@ -59,12 +59,12 @@ jobs:
 
       - name: Build plug-in bundle (ad-hoc signature)
         env:
-          FLOWBLUR_SIGN_IDENTITY: "-"
+          TBLUR_SIGN_IDENTITY: "-"
         run: plugin/build.sh
 
       - name: Build installer package (unsigned)
         env:
-          FLOWBLUR_INSTALLER_IDENTITY: "-"
+          TBLUR_INSTALLER_IDENTITY: "-"
         run: packaging/build_pkg.sh --no-build
 
   audit:

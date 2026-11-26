@@ -1,14 +1,14 @@
-//! flowblur-cli: run the FlowBlur core on PNG frames.
+//! tblur-cli: run the T Blur core on PNG frames.
 //!
-//! Single frame:  flowblur-cli [--prev a.png] --cur b.png [--next c.png] --out o.png [options]
-//! Sequence:      flowblur-cli --seq <dir> --out-dir <dir> [options]
+//! Single frame:  tblur-cli [--prev a.png] --cur b.png [--next c.png] --out o.png [options]
+//! Sequence:      tblur-cli --seq <dir> --out-dir <dir> [options]
 //! Options: --blur F  --sens F  --max-blur F  --quality draft|normal|high  --view output|vectors
 //!          --no-linear  --bench N (render each frame N extra times and report min/median)
 //!          --fd F  frame distance of both neighbours in output frames (default 1.0; may be < 1,
 //!                  e.g. 0.2 for adjacent 120 fps source frames on a 24 fps timeline). In --seq
 //!                  mode it multiplies the per-neighbour distance in input frames.
 
-use flowblur_core::*;
+use tblur_core::*;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::Instant;
@@ -56,7 +56,7 @@ fn save(p: &Path, w: usize, h: usize, data: &[f32]) {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  flowblur-cli [--prev a.png] --cur b.png [--next c.png] --out o.png [opts]\n  flowblur-cli --seq <dir> --out-dir <dir> [opts]\nopts: --blur F --sens F --max-blur F --quality draft|normal|high --view output|vectors --no-linear --bench N --fd F"
+        "usage:\n  tblur-cli [--prev a.png] --cur b.png [--next c.png] --out o.png [opts]\n  tblur-cli --seq <dir> --out-dir <dir> [opts]\nopts: --blur F --sens F --max-blur F --quality draft|normal|high --view output|vectors --no-linear --bench N --fd F"
     );
     exit(2)
 }

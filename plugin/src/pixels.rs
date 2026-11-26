@@ -42,7 +42,7 @@
 //!   input values are replaced by 0 because the core requires finite input.
 
 /// Pixel layouts we understand.
-use flowblur_core::par;
+use tblur_core::par;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Layout {
@@ -397,7 +397,7 @@ fn read_rgba_rows<C: Codec>(src: &[u8], desc: &ImageDesc, out: &mut [f32]) {
 }
 
 fn read_rgba_and_luma_rows<C: Codec>(src: &[u8], desc: &ImageDesc, out: &mut [f32], luma: &mut [f32]) -> f32 {
-    let [wr, wg, wb] = flowblur_core::LUMA_WEIGHTS;
+    let [wr, wg, wb] = tblur_core::LUMA_WEIGHTS;
     let (w, straight) = (desc.width, desc.alpha == Alpha::Straight);
     let row_max_sync = std::sync::atomic::AtomicU32::new(0);
     par::for_rows_mut2(out, luma, w * 4, w, 32, |y0, rchunk, lchunk| {
@@ -423,8 +423,8 @@ fn read_rgba_and_luma_rows<C: Codec>(src: &[u8], desc: &ImageDesc, out: &mut [f3
 }
 
 /// Host buffer -> luma plane (len = width*height) plus the largest alpha, in one parallel pass
-/// and without materialising RGBA. Luma uses `flowblur_core::LUMA_WEIGHTS` on the premultiplied,
-/// gamma-encoded values with the same arithmetic as `read_rgba` + `flowblur_core::luma_from_rgba`.
+/// and without materialising RGBA. Luma uses `tblur_core::LUMA_WEIGHTS` on the premultiplied,
+/// gamma-encoded values with the same arithmetic as `read_rgba` + `tblur_core::luma_from_rgba`.
 pub fn read_luma(src: &[u8], desc: &ImageDesc) -> Result<(Vec<f32>, f32), PixelError> {
     desc.validate(src.len())?;
     let pixels = desc.width.checked_mul(desc.height).ok_or(PixelError::BufferTooSmall)?;
@@ -439,7 +439,7 @@ pub fn read_luma(src: &[u8], desc: &ImageDesc) -> Result<(Vec<f32>, f32), PixelE
 }
 
 fn read_luma_rows<C: Codec>(src: &[u8], desc: &ImageDesc, luma: &mut [f32]) -> f32 {
-    let [wr, wg, wb] = flowblur_core::LUMA_WEIGHTS;
+    let [wr, wg, wb] = tblur_core::LUMA_WEIGHTS;
     let (w, h, straight) = (desc.width, desc.height, desc.alpha == Alpha::Straight);
     let mut row_max = vec![0.0f32; h];
     par::for_rows_mut2(luma, &mut row_max, w, 1, 32, |y0, lchunk, mchunk| {
@@ -539,7 +539,7 @@ fn read_rgba_bgra8_neon(src: &[u8], desc: &ImageDesc, out: &mut [f32]) {
 fn read_rgba_and_luma_bgra8_neon(src: &[u8], desc: &ImageDesc, out: &mut [f32], luma: &mut [f32]) -> f32 {
     use std::arch::aarch64::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    let [wr, wg, wb] = flowblur_core::LUMA_WEIGHTS;
+    let [wr, wg, wb] = tblur_core::LUMA_WEIGHTS;
     let (w, straight) = (desc.width, desc.alpha == Alpha::Straight);
     let max_bits = AtomicU32::new(0);
     par::for_rows_mut2(out, luma, w * 4, w, 32, |y0, rchunk, lchunk| {
@@ -600,7 +600,7 @@ fn read_rgba_and_luma_bgra8_neon(src: &[u8], desc: &ImageDesc, out: &mut [f32], 
 fn read_luma_bgra8_neon(src: &[u8], desc: &ImageDesc, luma: &mut [f32]) -> f32 {
     use std::arch::aarch64::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    let [wr, wg, wb] = flowblur_core::LUMA_WEIGHTS;
+    let [wr, wg, wb] = tblur_core::LUMA_WEIGHTS;
     let (w, straight) = (desc.width, desc.alpha == Alpha::Straight);
     let max_bits = AtomicU32::new(0);
     par::for_rows_mut(luma, w, 32, |y0, lchunk| {
@@ -967,7 +967,7 @@ mod tests {
         // Direct luma decode == read_rgba + core::luma_from_rgba (same arithmetic, so exact up
         // to float rounding), and its max alpha == max over the RGBA image.
         let (luma, max_a) = read_luma(&buf, &d).unwrap();
-        let reference = flowblur_core::luma_from_rgba(flowblur_core::Frame { width: w, height: h, data: &rgba });
+        let reference = tblur_core::luma_from_rgba(tblur_core::Frame { width: w, height: h, data: &rgba });
         assert_eq!(luma.len(), reference.len());
         for (a, b) in luma.iter().zip(&reference) {
             assert!((a - b).abs() <= 1e-6 * b.abs().max(1.0), "{layout:?} {alpha:?} neg={negative}: {a} vs {b}");

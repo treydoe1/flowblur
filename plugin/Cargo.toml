@@ -1,14 +1,14 @@
 [package]
-name = "flowblur"
-version = "0.6.0"
+name = "tblur"
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/treydoe1/flowblur"
-description = "FlowBlur: optical-flow motion blur, Adobe Premiere Pro / After Effects effect shell"
+repository = "https://github.com/treydoe1/tblur"
+description = "T Blur: optical-flow motion blur, Adobe Premiere Pro / After Effects effect shell"
 publish = false
 
 [lib]
-name = "flowblur"
+name = "tblur"
 # cdylib is the shipped plug-in binary; rlib lets `cargo test` link the unit tests.
 crate-type = ["cdylib", "rlib"]
 
@@ -19,7 +19,7 @@ crate-type = ["cdylib", "rlib"]
 # argument of PluginDataEntryFunction2, and lacks the MFR `Sync` checks. Commit c2eb866 fixes
 # all three. Both crates report version 0.4.0.
 after-effects = { git = "https://github.com/virtualritz/after-effects", rev = "c2eb86609b293f046b18bc3e18e110dcc9ae9f17" }
-flowblur-core = { path = "../core", default-features = false }
+tblur-core = { path = "../core", default-features = false }
 # Row-parallel pixel conversion on the global pool the core already uses.
 rayon = "1.10"
 

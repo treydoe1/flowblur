@@ -1,16 +1,16 @@
 #!/bin/bash
-# Builds the FlowBlur macOS installer package: ROOT/dist/FlowBlur-<version>.pkg
+# Builds the T Blur macOS installer package: ROOT/dist/TBlur-<version>.pkg
 #
-#   packaging/build_pkg.sh                     run plugin/build.sh first, then package dist/FlowBlur.plugin
-#   packaging/build_pkg.sh --no-build          package the existing dist/FlowBlur.plugin as is
+#   packaging/build_pkg.sh                     run plugin/build.sh first, then package dist/TBlur.plugin
+#   packaging/build_pkg.sh --no-build          package the existing dist/TBlur.plugin as is
 #   packaging/build_pkg.sh --notarize PROFILE  also notarize and staple the package, using the
 #                                              notarytool keychain profile PROFILE (or set
-#                                              FLOWBLUR_NOTARY_PROFILE)
+#                                              TBLUR_NOTARY_PROFILE)
 #
-# The package installs FlowBlur.plugin (root:wheel, real files, no symlinks) to
+# The package installs TBlur.plugin (root:wheel, real files, no symlinks) to
 #   /Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/
 # It is non-relocatable, so Installer never "upgrades" some other copy of the bundle found on disk.
-# Signed with FLOWBLUR_INSTALLER_IDENTITY if set ("-" means unsigned), else with the first
+# Signed with TBLUR_INSTALLER_IDENTITY if set ("-" means unsigned), else with the first
 # "Developer ID Installer" identity in the keychain, else unsigned. Notarized only with --notarize,
 # which requires a Developer ID Installer signature and a Developer ID Application bundle signature
 # with the hardened runtime and a secure timestamp. This script installs nothing and needs no sudo.
@@ -18,15 +18,15 @@ set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$PKG_DIR/.." && pwd)"
-NAME=FlowBlur
-BUNDLE_ID=com.flowblur.motionblur
-PKG_ID=com.flowblur.motionblur.pkg
+NAME=TBlur
+BUNDLE_ID=com.tblur.motionblur
+PKG_ID=com.tblur.motionblur.pkg
 INSTALL_LOCATION="/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore"
 BUNDLE="$ROOT/dist/$NAME.plugin"
 BINARY="$BUNDLE/Contents/MacOS/$NAME"
 
 BUILD=1
-NOTARY_PROFILE="${FLOWBLUR_NOTARY_PROFILE:-}"
+NOTARY_PROFILE="${TBLUR_NOTARY_PROFILE:-}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-build) BUILD=0 ;;
@@ -60,7 +60,7 @@ codesign --verify --deep --strict "$BUNDLE" || die "code signature of $BUNDLE do
 CARGO="${CARGO:-cargo}"
 command -v "$CARGO" >/dev/null 2>&1 || CARGO=/opt/homebrew/bin/cargo
 VERSION="$(cd "$ROOT/plugin" && "$CARGO" metadata --format-version 1 --no-deps \
-    | /usr/bin/python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "flowblur"))')"
+    | /usr/bin/python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "tblur"))')"
 [[ -n "$VERSION" ]] || die "could not read the version from cargo metadata"
 BUNDLE_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$BUNDLE/Contents/Info.plist")"
 [[ "$BUNDLE_VERSION" == "$VERSION" ]] \
@@ -77,7 +77,7 @@ MIN_OS="$(otool -l "$BINARY" | awk '
 OUT="$ROOT/dist/$NAME-$VERSION.pkg"
 echo "Packaging $NAME $VERSION (minimum macOS $MIN_OS) -> $OUT"
 
-# Not named flowblur-*: an installed FlowBlur reads /tmp/flowblur-* names as switches.
+# Not named tblur-*: an installed T Blur reads /tmp/tblur-* names as switches.
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/fb-pkg.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -140,20 +140,20 @@ NFILES="$(wc -l < "$WORK/bom.txt" | tr -d ' ')"
 cat > "$WORK/distribution.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
-    <title>FlowBlur</title>
+    <title>T Blur</title>
     <welcome file="welcome.txt" mime-type="text/plain"/>
     <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <allowed-os-versions>
         <os-version min="$MIN_OS"/>
     </allowed-os-versions>
-    <installation-check script="flowblur_check()"/>
+    <installation-check script="tblur_check()"/>
     <script><![CDATA[
-function flowblur_check() {
+function tblur_check() {
     if (system.sysctl('hw.optional.arm64') != 1) {
         my.result.type = 'Fatal';
         my.result.title = 'Apple Silicon required';
-        my.result.message = 'FlowBlur requires a Mac with Apple Silicon. It cannot be installed on an Intel Mac.';
+        my.result.message = 'T Blur requires a Mac with Apple Silicon. It cannot be installed on an Intel Mac.';
         return false;
     }
     return true;
@@ -172,11 +172,11 @@ function flowblur_check() {
 </installer-gui-script>
 EOF
 
-# Installer identity: FLOWBLUR_INSTALLER_IDENTITY (the certificate's name, passed to productbuild
+# Installer identity: TBLUR_INSTALLER_IDENTITY (the certificate's name, passed to productbuild
 # as is; "-" means unsigned), else the first valid "Developer ID Installer" identity, else unsigned.
 # A given identity that productbuild cannot use is an error, never a silent fallback.
 SIGN_ARGS=()
-INSTALLER_ID="${FLOWBLUR_INSTALLER_IDENTITY:-}"
+INSTALLER_ID="${TBLUR_INSTALLER_IDENTITY:-}"
 if [[ -z "$INSTALLER_ID" ]]; then
     INSTALLER_ID="$(security find-identity -v 2>/dev/null \
         | awk -F'"' 'index($2, "Developer ID Installer: ") == 1 && !n++ { print $2 }' || true)"
