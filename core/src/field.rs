@@ -72,7 +72,9 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 /// Forward-backward check (Sundaram et al. 2010): following the forward flow and then the backward
-/// flow must return close to the start.
+/// flow must return close to the start. The closest return among the interpolated backward flow and
+/// the 3x3 pixels around the landing point counts. At a motion edge the interpolated value mixes
+/// the motions of both sides, so pixels on both sides of the edge would otherwise lose their motion.
 fn fb_consistency(c: &mut Plane, fu: &Plane, fv: &Plane, bu: &Plane, bv: &Plane) {
     let w = c.w;
     let min_r = (16384 / w.max(1)).max(8);
@@ -85,8 +87,18 @@ fn fb_consistency(c: &mut Plane, fu: &Plane, fv: &Plane, bu: &Plane, bv: &Plane)
                 let i = base + x;
                 let (u, v) = (fu.d[i], fv.d[i]);
                 let (px, py) = (x as f32 + u, yf + v);
-                let (b0, b1) = (bu.bilinear(px, py), bv.bilinear(px, py));
-                let e2 = (u + b0) * (u + b0) + (v + b1) * (v + b1);
+                let (mut b0, mut b1) = (bu.bilinear(px, py), bv.bilinear(px, py));
+                let mut e2 = (u + b0) * (u + b0) + (v + b1) * (v + b1);
+                let (xi, yi) = (px.round() as isize, py.round() as isize);
+                for oy in -1..=1 {
+                    for ox in -1..=1 {
+                        let (c0, c1) = (bu.get_c(xi + ox, yi + oy), bv.get_c(xi + ox, yi + oy));
+                        let e = (u + c0) * (u + c0) + (v + c1) * (v + c1);
+                        if e < e2 {
+                            (b0, b1, e2) = (c0, c1, e);
+                        }
+                    }
+                }
                 let tol2 = 0.01 * (u * u + v * v + b0 * b0 + b1 * b1) + 0.5;
                 if e2 > tol2 {
                     *o *= (-(e2 - tol2) / tol2).exp();
@@ -462,6 +474,24 @@ pub(crate) fn analyze(cur_luma: Luma, prev: Option<Neighbor>, next: Option<Neigh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fb_consistency_keeps_motion_at_edges_and_rejects_occlusions() {
+        // The left half moves 3.5 px right over the still right half. In the backward flow the
+        // moving half covers x = 4..=18. x = 19, next to where the flow of x = 15 lands, already
+        // holds the still half's value.
+        let (w, h) = (32, 8);
+        let plane = |f: &dyn Fn(usize) -> f32| Plane::from_vec(w, h, (0..w * h).map(|i| f(i % w)).collect());
+        let fu = plane(&|x| if x < 16 { 3.5 } else { 0.0 });
+        let bu = plane(&|x| if (4..=18).contains(&x) { -3.5 } else { 0.0 });
+        let zero = Plane::new(w, h);
+        let mut c = plane(&|_| 1.0);
+        fb_consistency(&mut c, &fu, &zero, &bu, &zero);
+        let row = 4 * w;
+        assert!(c.d[row + 15] > 0.99, "last moving pixel lost its motion: {}", c.d[row + 15]);
+        assert!(c.d[row + 10] > 0.99);
+        assert!(c.d[row + 16] < 0.01, "covered pixel kept its motion: {}", c.d[row + 16]);
+    }
 
     #[test]
     fn dt_line_pass_handles_small_and_empty_lengths() {
