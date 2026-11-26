@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Moving edges keep their motion. The forward-backward check in the motion analysis also tries the
+  pixels around each landing point, so correct motion on both sides of a motion edge is no longer
+  rejected and the edge is blurred instead of left sharp.
+
 ## 0.7.0
 
 - FlowBlur is now called T Blur. The effect is under Video Effects, T Blur. The repository moved
