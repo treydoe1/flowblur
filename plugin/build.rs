@@ -1,4 +1,4 @@
-//! Builds the PiPL resource (target/<profile>/flowblur.rsrc), PkgInfo and Info.plist via the
+//! Builds the PiPL resource (target/<profile>/tblur.rsrc), PkgInfo and Info.plist via the
 //! `pipl` crate, and exports the PiPL values as env vars that `define_effect!` reports back to
 //! the host at PF_Cmd_GLOBAL_SETUP. Because the out-flags and the effect version reported at
 //! global setup are read from the same `PIPL_OUTFLAGS`/`PIPL_OUTFLAGS2`/`PIPL_VERSION` values
@@ -26,7 +26,7 @@ fn main() {
     // in debug builds unless this cfg is set).
     println!("cargo:rustc-cfg=catch_panics");
 
-    // Use `flowblur_core::render_with_luma` when ../core/src/lib.rs provides it; otherwise
+    // Use `tblur_core::render_with_luma` when ../core/src/lib.rs provides it; otherwise
     // fall back to `render` (see `call_core` in src/lib.rs). Detected automatically.
     println!("cargo::rustc-check-cfg=cfg(core_has_render_with_luma)");
     println!("cargo:rerun-if-changed=../core/src/lib.rs");
@@ -38,12 +38,12 @@ fn main() {
 
     // Give the dylib a neutral install name instead of the absolute path of the build tree.
     #[cfg(target_os = "macos")]
-    println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/FlowBlur");
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/TBlur");
 
     pipl::plugin_build(vec![
         Property::Kind(PIPLType::AEEffect),
-        Property::Name("FlowBlur"),
-        Property::Category("FlowBlur"),
+        Property::Name("T Blur"),
+        Property::Category("T Blur"),
 
         #[cfg(target_os = "windows")]
         Property::CodeWin64X86("EffectMain"),
@@ -77,8 +77,8 @@ fn main() {
             OutFlags2::SupportsGetFlattenedSequenceData
         ),
         // Must never change: projects reference the effect by this name.
-        Property::AE_Effect_Match_Name("FLOWBLUR Motion Blur"),
+        Property::AE_Effect_Match_Name("TBLUR Motion Blur"),
         Property::AE_Reserved_Info(8),
-        Property::AE_Effect_Support_URL("https://github.com/treydoe1/flowblur"),
+        Property::AE_Effect_Support_URL("https://github.com/treydoe1/tblur"),
     ])
 }

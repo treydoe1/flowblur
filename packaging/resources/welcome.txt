@@ -1,8 +1,8 @@
-FlowBlur adds an optical-flow motion blur effect to Adobe Premiere Pro (and After Effects).
+T Blur adds an optical-flow motion blur effect to Adobe Premiere Pro (and After Effects).
 
-This installer copies FlowBlur.plugin to:
+This installer copies TBlur.plugin to:
 /Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/
 
 Requires a Mac with Apple Silicon. Quit Premiere Pro and After Effects before continuing; they load the plug-in when they start.
 
-Any previously installed FlowBlur.plugin at that location is replaced.
+Any previously installed TBlur.plugin at that location is replaced.

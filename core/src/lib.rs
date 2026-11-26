@@ -1,4 +1,4 @@
-//! FlowBlur core: optical-flow-driven motion blur.
+//! T Blur core: optical-flow-driven motion blur.
 //!
 //! Pipeline (see the module docs for details):
 //! 1. `field`: luma at analysis resolution, exposure-normalised; DIS optical flow (`dis`) to each

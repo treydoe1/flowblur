@@ -3,7 +3,7 @@
 //! Fetches neighbour frames via Premiere's GPU dependency graph (`GetFrameDependencies` -> Metal
 //! `MTLBuffer`s) instead of slow CPU `PF_CHECKOUT_PARAM` calls, then runs the exact same
 //! neighbour-selection rule (`effect::select_legacy_neighbors`) and CPU optical-flow engine
-//! (`flowblur_core::render_with_owned_luma`) as the CPU path so the rendered image is bit-identical.
+//! (`tblur_core::render_with_owned_luma`) as the CPU path so the rendered image is bit-identical.
 //!
 //! Safety architecture (intentionally avoids `premiere::define_gpu_filter!`):
 //! * Every FFI entry point and callback wraps its entire body in `catch_unwind` + `autoreleasepool`.
@@ -27,7 +27,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use flowblur_core as core;
+use tblur_core as core;
 use objc2::rc::autoreleasepool;
 use premiere::sys;
 
@@ -45,8 +45,8 @@ use crate::pixels::{self, Layout};
 /// frames in interleaved order (`-1, +1, -2, +2, ...`); only frames inspected by
 /// `select_legacy_neighbors` are read back from Metal.
 ///
-/// May be overridden in debug mode (`CreateInstance` only) via `/tmp/flowblur-gpu-steps`
-/// containing a single digit `'1'..='4'` when `/tmp/flowblur-debug` also exists.
+/// May be overridden in debug mode (`CreateInstance` only) via `/tmp/tblur-gpu-steps`
+/// containing a single digit `'1'..='4'` when `/tmp/tblur-debug` also exists.
 pub const GPU_DEPENDENCY_STEPS: u32 = MAX_K;
 
 /// Per-instance state stored in `PrGPUFilterInstance::ioPrivatePluginData`.
@@ -414,7 +414,7 @@ pub const OWNER_ID_NOT_VALID: i32 = -2147483643;
 /// Pure decision table for the GPU filter scope gate (after the kill switch and framework gates).
 ///
 /// Priority:
-/// 1. Debug-only force switch (`/tmp/flowblur-gpu-force`, only when `/tmp/flowblur-debug` exists):
+/// 1. Debug-only force switch (`/tmp/tblur-gpu-force`, only when `/tmp/tblur-debug` exists):
 ///    - `GpuForceMode::All` -> accept everything (`forced="all"`).
 ///    - `GpuForceMode::Adjust` -> accept effect nodes whose operator-owner lookup failed with
 ///      `OWNER_ID_NOT_VALID` (`-2147483643`, no owner), matching Premiere 2027 adjustment-layer
@@ -1144,7 +1144,7 @@ unsafe fn collect_segment_graph_dump(
     }
 }
 
-/// Dumps the video segment graph once per unique runtime instance ID when `/tmp/flowblur-debug`
+/// Dumps the video segment graph once per unique runtime instance ID when `/tmp/tblur-debug`
 /// is active. Bounded, panic-safe, and non-blocking.
 unsafe fn maybe_dump_segment_graph(
     sp: *const sys::SPBasicSuite,
@@ -1275,7 +1275,7 @@ pub fn map_gpu_params(raw: &[sys::PrParam; 6]) -> Result<core::Params, &'static 
     })
 }
 
-/// Reads FlowBlur's core parameters from Premiere via `PrSDKVideoSegmentSuite::GetParam`.
+/// Reads T Blur's core parameters from Premiere via `PrSDKVideoSegmentSuite::GetParam`.
 unsafe fn read_gpu_core_params(
     sp: *const sys::SPBasicSuite,
     node_id: i32,
@@ -1633,13 +1633,13 @@ pub struct GpuRenderReport {
     pub out_storage: &'static str,
 }
 
-/// Runs the FlowBlur adjustment-layer render pipeline directly over Metal buffers:
+/// Runs the T Blur adjustment-layer render pipeline directly over Metal buffers:
 /// 1. Reads `cur` into premultiplied f32 RGBA + luma + `max_alpha` (subject to `deadline`).
 /// 2. Runs `effect::select_legacy_neighbors` (exact same function as the CPU legacy path),
 ///    reading back ONLY the dependency buffers actually inspected by the search, rejecting
 ///    empty/fully-transparent edge frames with the same `cur_has_alpha && max_a <= 0.0` rule, and
 ///    aborting immediately if any GPU wait times out (Item 5).
-/// 3. Runs `effect::call_core_owned` (`flowblur_core::render_with_owned_luma`).
+/// 3. Runs `effect::call_core_owned` (`tblur_core::render_with_owned_luma`).
 /// 4. Writes the blurred output into `out` (subject to the same single `deadline`).
 ///
 /// # Safety
@@ -2033,7 +2033,7 @@ unsafe extern "C" fn cb_create_instance(
             let node_id =
                 std::ptr::read_unaligned(std::ptr::addr_of!((*io_instance_data).inNodeID));
 
-            // 1. Kill switch: /tmp/flowblur-no-gpu forces the CPU path without reinstalling.
+            // 1. Kill switch: /tmp/tblur-no-gpu forces the CPU path without reinstalling.
             if diag::gpu_disabled() {
                 if log {
                     diag::append(&format!(
@@ -2484,7 +2484,7 @@ unsafe extern "C" fn cb_render(
                 }
             };
 
-            // Immediate kill switch: `/tmp/flowblur-no-gpu` hands frames on existing GPU instances
+            // Immediate kill switch: `/tmp/tblur-no-gpu` hands frames on existing GPU instances
             // straight back to Premiere's CPU path without touching any frame.
             if inst.is_gpu_disabled() {
                 log_outcome(
@@ -2917,7 +2917,7 @@ unsafe extern "C" fn cb_render(
 /// Exported Premiere Pro GPU filter entry point (`xGPUFilterEntry`).
 ///
 /// Leaves `outFilterInfo->outMatchName` zeroed (NULL `PrSDKString`), which Adobe's SDK documents
-/// as defaulting to this bundle's PiPL `AE_Effect_Match_Name` (`"FLOWBLUR Motion Blur"`).
+/// as defaulting to this bundle's PiPL `AE_Effect_Match_Name` (`"TBLUR Motion Blur"`).
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn xGPUFilterEntry(
@@ -3767,9 +3767,9 @@ mod tests {
 
     #[test]
     fn debug_gpu_steps_override_parsing_uses_injectable_path() {
-        // Item 12 regression: never touch /tmp/flowblur-*; use an isolated temp file.
+        // Item 12 regression: never touch /tmp/tblur-*; use an isolated temp file.
         let path = std::env::temp_dir().join(format!(
-            "flowblur-unit-gpu-steps-{}-{:?}.txt",
+            "tblur-unit-gpu-steps-{}-{:?}.txt",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -3797,9 +3797,9 @@ mod tests {
     #[test]
     fn debug_flag_safe_reader_and_fault_parsing() {
         // Items 3 & 4: regular files only, no symlink following, no FIFO blocking, <= 16 bytes,
-        // and fault mode parsing through an injectable path (never touches /tmp/flowblur-*).
+        // and fault mode parsing through an injectable path (never touches /tmp/tblur-*).
         let base = std::env::temp_dir().join(format!(
-            "flowblur-safe-flag-{}-{}",
+            "tblur-safe-flag-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5613,7 +5613,7 @@ mod tests {
     fn debug_gpu_force_override_parsing_uses_safe_reader() {
         use diag::GpuForceMode;
         let base = std::env::temp_dir().join(format!(
-            "flowblur-force-flag-{}-{}",
+            "tblur-force-flag-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5798,7 +5798,7 @@ mod tests {
 
         // Real filesystem checks across -debug, -gpu-steps, -gpu-fault, and -gpu-force.
         let base = std::env::temp_dir().join(format!(
-            "flowblur-perm-flag-{}-{}",
+            "tblur-perm-flag-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5849,7 +5849,7 @@ mod tests {
     fn render_kill_switch_hands_off_to_cpu_immediately_and_recovers() {
         let _guard = MOCK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!(
-            "flowblur-kill-switch-{}-{}",
+            "tblur-kill-switch-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5963,7 +5963,7 @@ mod tests {
         }
 
         // 3. Blur enabled with all-duplicate neighbours (no usable neighbour on either side) ->
-        //    `flowblur_core` outputs exact unblurred copy matching CPU bit-for-bit and returns NoError.
+        //    `tblur_core` outputs exact unblurred copy matching CPU bit-for-bit and returns NoError.
         {
             reset_mock_host();
             let mut rig = MockRig::new();

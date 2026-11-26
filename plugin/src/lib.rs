@@ -1,10 +1,10 @@
-//! FlowBlur: Adobe Premiere Pro / After Effects effect shell around `flowblur_core`.
+//! T Blur: Adobe Premiere Pro / After Effects effect shell around `tblur_core`.
 //!
 //! * `pixels`    – host pixel buffers <-> premultiplied RGBA f32 (pure, unit-tested)
 //! * `neighbors` – choosing prev/next frames and frame distances (pure, unit-tested)
 //! * `source_cache` – process-global per-clip record: source-rate verdict, current-checkout match (Premiere)
 //! * `effect`    – the Adobe glue (entry point `EffectMain`, parameters, checkout, render)
-//! * `diag`      – opt-in diagnostics log (/tmp/flowblur-debug -> /tmp/flowblur-debug.log)
+//! * `diag`      – opt-in diagnostics log (/tmp/tblur-debug -> /tmp/tblur-debug.log)
 //! * `metal_io`  – macOS Metal buffer synchronization, readback and writeback (Premiere GPU path)
 //! * `gpu_filter` – hand-written panic-safe Premiere GPU filter (`xGPUFilterEntry`, adjustment layers)
 //! * `update_check` – once-a-day check for a newer release on GitHub (notice only, never installs)

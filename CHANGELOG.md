@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.0
+
+- FlowBlur is now called T Blur. The effect is under Video Effects, T Blur. The repository moved
+  to <https://github.com/treydoe1/tblur>.
+- The installer installs `TBlur.plugin` and removes an installed `FlowBlur.plugin` and its
+  installer receipt, so Premiere Pro does not list both effects. `packaging/uninstall.sh` removes
+  either one.
+- The effect has a new match name, `TBLUR Motion Blur`. Projects saved with FlowBlur show the
+  effect as missing. Apply T Blur to those clips again.
+- New names for the files and settings that had FlowBlur in them: the switches are
+  `/tmp/tblur-no-gpu` and `/tmp/tblur-debug`, the update check keeps its state in
+  `~/Library/Application Support/TBlur`, and the build settings are `TBLUR_SIGN_IDENTITY`,
+  `TBLUR_INSTALLER_IDENTITY` and `TBLUR_NOTARY_PROFILE`.
+- FlowBlur 0.6.0 does not report this release as an update. Its update check accepts only the old
+  repository address.
+
 ## 0.6.0
 
 - Update notice: at most once every 24 hours, when the host loads the plug-in, FlowBlur asks

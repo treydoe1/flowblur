@@ -1,17 +1,17 @@
 [package]
-name = "flowblur-core"
+name = "tblur-core"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/treydoe1/flowblur"
+repository = "https://github.com/treydoe1/tblur"
 
 [lib]
-name = "flowblur_core"
+name = "tblur_core"
 path = "src/lib.rs"
 
 [[bin]]
-name = "flowblur-cli"
-path = "src/bin/flowblur-cli.rs"
+name = "tblur-cli"
+path = "src/bin/tblur-cli.rs"
 required-features = ["cli"]
 
 [features]

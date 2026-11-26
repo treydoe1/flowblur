@@ -166,11 +166,11 @@ impl Drop for HelperLease {
     }
 }
 
-/// Effective logical thread limit (`FLOWBLUR_THREADS` / `RAYON_NUM_THREADS` / rayon pool size).
+/// Effective logical thread limit (`TBLUR_THREADS` / `RAYON_NUM_THREADS` / rayon pool size).
 pub fn max_threads() -> usize {
     static MAX_T: OnceLock<usize> = OnceLock::new();
     *MAX_T.get_or_init(|| {
-        for var in ["FLOWBLUR_THREADS", "RAYON_NUM_THREADS"] {
+        for var in ["TBLUR_THREADS", "RAYON_NUM_THREADS"] {
             if let Ok(s) = std::env::var(var)
                 && let Ok(n) = s.trim().parse::<usize>()
                 && n >= 1

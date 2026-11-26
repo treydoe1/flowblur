@@ -27,7 +27,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use flowblur_core as core;
+use tblur_core as core;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, AnyProtocol, ProtocolObject};
 use objc2::{msg_send, sel};

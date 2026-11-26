@@ -1,15 +1,33 @@
 #!/bin/sh
-# FlowBlur preinstall: remove the previously installed bundle so the new one is a clean copy.
+# T Blur preinstall: remove the previously installed bundle so the new one is a clean copy.
 # Why: Installer merges a payload into an existing directory, so files left over from an older
-# FlowBlur.plugin would stay inside the bundle and break its code-signature seal (Premiere/AE refuse
+# TBlur.plugin would stay inside the bundle and break its code-signature seal (Premiere/AE refuse
 # plug-ins whose signature does not verify). If the old item is a symlink, rm removes the link only,
 # so the payload is never written through it to another location.
-# Only this one fixed path is ever removed.
+#
+# T Blur was called FlowBlur up to version 0.6.0. A FlowBlur.plugin left in place would show up in
+# Premiere Pro as a second effect, so it is removed too, together with its installer receipt, but
+# only when it is a symlink or a bundle with FlowBlur's identifier.
+# Only these two fixed paths are ever removed.
 set -e
 
-if [ -e "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin" ] || \
-   [ -L "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin" ]; then
-    /bin/rm -rf "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/FlowBlur.plugin"
+MEDIACORE="/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore"
+
+if [ -e "$MEDIACORE/TBlur.plugin" ] || [ -L "$MEDIACORE/TBlur.plugin" ]; then
+    /bin/rm -rf "$MEDIACORE/TBlur.plugin"
+fi
+
+LEGACY="$MEDIACORE/FlowBlur.plugin"
+if [ -L "$LEGACY" ]; then
+    /bin/rm -f "$LEGACY"
+elif [ -d "$LEGACY" ]; then
+    LEGACY_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$LEGACY/Contents/Info.plist" 2>/dev/null || true)"
+    if [ "$LEGACY_ID" = "com.flowblur.motionblur" ]; then
+        /bin/rm -rf "$LEGACY"
+    fi
+fi
+if /usr/sbin/pkgutil --pkg-info com.flowblur.motionblur.pkg >/dev/null 2>&1; then
+    /usr/sbin/pkgutil --forget com.flowblur.motionblur.pkg >/dev/null 2>&1 || true
 fi
 
 exit 0

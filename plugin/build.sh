@@ -1,16 +1,16 @@
 #!/bin/bash
-# Builds FlowBlur and assembles the signed macOS plug-in bundle at ROOT/dist/FlowBlur.plugin:
-#   Contents/MacOS/FlowBlur          the arm64 cdylib (exports EffectMain)
-#   Contents/Resources/FlowBlur.rsrc the PiPL resource produced by build.rs (pipl crate)
+# Builds T Blur and assembles the signed macOS plug-in bundle at ROOT/dist/TBlur.plugin:
+#   Contents/MacOS/TBlur          the arm64 cdylib (exports EffectMain)
+#   Contents/Resources/TBlur.rsrc the PiPL resource produced by build.rs (pipl crate)
 #   Contents/PkgInfo, Contents/Info.plist (also from the pipl crate)
 # then sets CFBundleIdentifier and codesigns it (Premiere/AE 25.2+ refuse unsigned plug-ins):
-# with FLOWBLUR_SIGN_IDENTITY if set, else a Developer ID Application or Apple Development
+# with TBLUR_SIGN_IDENTITY if set, else a Developer ID Application or Apple Development
 # identity from the keychain, else ad-hoc. See "Signing identity" below.
 # Mirrors the create_bundle recipe of the after-effects bindings' AdobePlugin.just, arm64 only.
 #
 # This script installs NOTHING. To install, copy (a real copy, not an alias/symlink) the bundle to
 #   "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/"
-# e.g.  sudo cp -R dist/FlowBlur.plugin "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/"
+# e.g.  sudo cp -R dist/TBlur.plugin "/Library/Application Support/Adobe/Common/Plug-ins/7.0/MediaCore/"
 # and restart Premiere Pro (and After Effects, which also scans MediaCore).
 set -euo pipefail
 
@@ -19,14 +19,14 @@ ROOT="$(cd "$PLUGIN_DIR/.." && pwd)"
 CARGO="${CARGO:-cargo}"
 command -v "$CARGO" >/dev/null 2>&1 || CARGO=/opt/homebrew/bin/cargo
 
-NAME=FlowBlur
-BIN=flowblur                       # Cargo package/lib name
-BUNDLE_ID=com.flowblur.motionblur
+NAME=TBlur
+BIN=tblur                          # Cargo package/lib name
+BUNDLE_ID=com.tblur.motionblur
 
 cd "$PLUGIN_DIR"
 # Keep local paths out of the shipped binary (panic-location strings). When several prefixes
 # match, rustc applies the last one, so the more specific $ROOT mapping must come after $HOME.
-export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~ --remap-path-prefix=$ROOT=flowblur"
+export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=~ --remap-path-prefix=$ROOT=tblur"
 "$CARGO" build --release
 
 METADATA="$("$CARGO" metadata --format-version 1 --no-deps)"
@@ -67,7 +67,7 @@ PLIST="$BUNDLE/Contents/Info.plist"
                         -c "Add :CFBundleInfoDictionaryVersion string 6.0" "$PLIST"
 
 # Signing identity, first match wins:
-#   FLOWBLUR_SIGN_IDENTITY (name or SHA-1 hash, passed to codesign as is; "-" forces ad-hoc),
+#   TBLUR_SIGN_IDENTITY (name or SHA-1 hash, passed to codesign as is; "-" forces ad-hoc),
 #   the first valid "Developer ID Application" identity (needed for notarization),
 #   the first valid "Apple Development" identity, otherwise ad-hoc.
 # A given identity that codesign cannot use is an error, never a silent fallback.
@@ -76,7 +76,7 @@ first_identity() {
     security find-identity -v -p codesigning 2>/dev/null \
         | awk -F'"' -v kind="$1" 'index($2, kind ": ") == 1 && !n++ { split($1, f, " "); print f[2] }' || true
 }
-SIGN_ID="${FLOWBLUR_SIGN_IDENTITY:-}"
+SIGN_ID="${TBLUR_SIGN_IDENTITY:-}"
 [[ -n "$SIGN_ID" ]] || SIGN_ID="$(first_identity "Developer ID Application")"
 [[ -n "$SIGN_ID" ]] || SIGN_ID="$(first_identity "Apple Development")"
 [[ -n "$SIGN_ID" ]] || SIGN_ID=-

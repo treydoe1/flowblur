@@ -1,27 +1,27 @@
-//! Opt-in diagnostics log. When the file `/tmp/flowblur-debug` exists (checked with one stat per
+//! Opt-in diagnostics log. When the file `/tmp/tblur-debug` exists (checked with one stat per
 //! render), one `key=value` line per render and one per global setup are appended to
-//! `/tmp/flowblur-debug.log`. Logging never fails a render: IO errors are ignored, panics are
+//! `/tmp/tblur-debug.log`. Logging never fails a render: IO errors are ignored, panics are
 //! caught, and a mutex keeps lines from concurrent render threads whole.
 
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
-const FLAG_PATH: &str = "/tmp/flowblur-debug";
-const SEGHASH_FLAG_PATH: &str = "/tmp/flowblur-debug-seghash";
-const NO_GPU_FLAG_PATH: &str = "/tmp/flowblur-no-gpu";
+const FLAG_PATH: &str = "/tmp/tblur-debug";
+const SEGHASH_FLAG_PATH: &str = "/tmp/tblur-debug-seghash";
+const NO_GPU_FLAG_PATH: &str = "/tmp/tblur-no-gpu";
 #[cfg(target_os = "macos")]
-const GPU_STEPS_PATH: &str = "/tmp/flowblur-gpu-steps";
+const GPU_STEPS_PATH: &str = "/tmp/tblur-gpu-steps";
 #[cfg(target_os = "macos")]
-const GPU_FAULT_PATH: &str = "/tmp/flowblur-gpu-fault";
+const GPU_FAULT_PATH: &str = "/tmp/tblur-gpu-fault";
 #[cfg(target_os = "macos")]
-const GPU_FORCE_PATH: &str = "/tmp/flowblur-gpu-force";
+const GPU_FORCE_PATH: &str = "/tmp/tblur-gpu-force";
 #[cfg(target_os = "macos")]
 const MAX_FLAG_FILE_BYTES: usize = 16;
-const LOG_PATH: &str = "/tmp/flowblur-debug.log";
+const LOG_PATH: &str = "/tmp/tblur-debug.log";
 
-/// Debug-only GPU gate force modes parsed from `/tmp/flowblur-gpu-force` in `CreateInstance`
-/// when `/tmp/flowblur-debug` also exists.
+/// Debug-only GPU gate force modes parsed from `/tmp/tblur-gpu-force` in `CreateInstance`
+/// when `/tmp/tblur-debug` also exists.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuForceMode {
@@ -43,8 +43,8 @@ impl GpuForceMode {
     }
 }
 
-/// Debug-only GPU fault injection modes parsed from `/tmp/flowblur-gpu-fault` in `CreateInstance`
-/// when `/tmp/flowblur-debug` also exists.
+/// Debug-only GPU fault injection modes parsed from `/tmp/tblur-gpu-fault` in `CreateInstance`
+/// when `/tmp/tblur-debug` also exists.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuFaultMode {
@@ -114,13 +114,13 @@ pub fn flag_enabled_from(path: &std::path::Path) -> bool {
     .unwrap_or(false)
 }
 
-/// True when `/tmp/flowblur-debug` is a trusted regular file owned by the current user and not
+/// True when `/tmp/tblur-debug` is a trusted regular file owned by the current user and not
 /// group- or world-writable.
 pub fn enabled() -> bool {
     flag_enabled_from(std::path::Path::new(FLAG_PATH))
 }
 
-/// True when `/tmp/flowblur-debug-seghash` is a trusted regular file owned by the current user
+/// True when `/tmp/tblur-debug-seghash` is a trusted regular file owned by the current user
 /// and not group- or world-writable.
 pub fn seghash_enabled() -> bool {
     flag_enabled_from(std::path::Path::new(SEGHASH_FLAG_PATH))
@@ -133,7 +133,7 @@ pub fn gpu_disabled_from(path: &std::path::Path) -> bool {
     catch_unwind(|| std::fs::metadata(path).is_ok()).unwrap_or(false)
 }
 
-/// True when the GPU kill switch file `/tmp/flowblur-no-gpu` exists. Intentionally permissive
+/// True when the GPU kill switch file `/tmp/tblur-no-gpu` exists. Intentionally permissive
 /// because it only disables the GPU path (falling back to CPU).
 #[cfg(target_os = "macos")]
 pub fn gpu_disabled() -> bool {
@@ -214,7 +214,7 @@ pub fn resolve_gpu_steps_from(
     }
 }
 
-/// Reads `/tmp/flowblur-gpu-steps` when `debug_enabled` is true. Called in `CreateInstance` only.
+/// Reads `/tmp/tblur-gpu-steps` when `debug_enabled` is true. Called in `CreateInstance` only.
 #[cfg(target_os = "macos")]
 pub fn resolve_gpu_steps(debug_enabled: bool, default_steps: u32) -> (u32, bool) {
     resolve_gpu_steps_from(debug_enabled, std::path::Path::new(GPU_STEPS_PATH), default_steps)
@@ -243,7 +243,7 @@ pub fn resolve_gpu_fault_from(debug_enabled: bool, fault_path: &std::path::Path)
     }
 }
 
-/// Reads `/tmp/flowblur-gpu-fault` when `debug_enabled` is true. Called in `CreateInstance` only.
+/// Reads `/tmp/tblur-gpu-fault` when `debug_enabled` is true. Called in `CreateInstance` only.
 #[cfg(target_os = "macos")]
 pub fn resolve_gpu_fault(debug_enabled: bool) -> GpuFaultMode {
     resolve_gpu_fault_from(debug_enabled, std::path::Path::new(GPU_FAULT_PATH))
@@ -271,7 +271,7 @@ pub fn resolve_gpu_force_from(debug_enabled: bool, force_path: &std::path::Path)
     }
 }
 
-/// Reads `/tmp/flowblur-gpu-force` when `debug_enabled` is true. Called in `CreateInstance` only.
+/// Reads `/tmp/tblur-gpu-force` when `debug_enabled` is true. Called in `CreateInstance` only.
 #[cfg(target_os = "macos")]
 pub fn resolve_gpu_force(debug_enabled: bool) -> GpuForceMode {
     resolve_gpu_force_from(debug_enabled, std::path::Path::new(GPU_FORCE_PATH))
